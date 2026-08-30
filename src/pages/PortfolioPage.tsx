@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useCreatorStore } from '../stores/creatorStore';
+import { uploadReelFile, saveReel } from '../services/reelsService';
 
 export default function PortfolioPage() {
   const navigate = useNavigate();
@@ -16,6 +17,7 @@ export default function PortfolioPage() {
   const [uploadDesc, setUploadDesc] = useState('');
   const [uploadCategory, setUploadCategory] = useState('beauty');
   const [toastMessage, setToastMessage] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -39,75 +41,45 @@ export default function PortfolioPage() {
     e.target.value = '';
   };
 
-  const handleConfirmUpload = () => {
+  const handleConfirmUpload = async () => {
     if (!pendingFile) return;
 
-    const blobUrl = URL.createObjectURL(pendingFile);
-    const newReel = {
-      id: `reel-${Date.now()}`,
-      title: uploadTitle.trim() || pendingFile.name.replace(/\.[^.]+$/, ''),
-      description: uploadDesc.trim() || 'Uploaded portfolio item',
-      category: uploadCategory,
-      thumbnailUrl: '', // Will show first frame or fallback
-      videoUrl: pendingFile.type.startsWith('video/') ? blobUrl : '',
-      mediaUrl: pendingFile.type.startsWith('image/') ? blobUrl : '',
-      metrics: { views: 0, likes: 0, comments: 0, engagementRate: 0 },
-      createdAt: new Date().toISOString(),
-      campaignId: null,
-    };
+    setIsUploading(true);
+    try {
+      const creatorId = creator?.id || `creator-${currentUser?.id || 'me'}`;
+      // 1. Upload file to Supabase Storage
+      const videoUrl = await uploadReelFile(creatorId, pendingFile);
 
-    // Load existing reels
-    const creatorId = creator?.id || `creator-${currentUser?.id || 'me'}`;
-    const savedReels = localStorage.getItem(`reels-${creatorId}`);
-    let reelsList: any[] = [];
+      // 2. Save metadata to Supabase DB
+      const isVideo = pendingFile.type.startsWith('video/');
+      const isImage = pendingFile.type.startsWith('image/');
 
-    if (savedReels) {
-      try {
-        reelsList = JSON.parse(savedReels);
-      } catch {}
-    } else {
-      // Seed defaults
-      const portfolioReels = creator?.portfolio.map((item) => ({
-        id: item.id,
-        title: item.title,
-        description: item.description,
-        category: item.category,
-        thumbnailUrl: item.mediaUrl,
-        videoUrl: '',
-        metrics: {
-          views: item.metrics.views,
-          likes: item.metrics.likes,
-          comments: item.metrics.comments,
-          engagementRate: item.metrics.engagementRate,
-        },
-        createdAt: item.createdAt,
-        campaignId: item.campaignId,
-      })) || [];
+      const saved = await saveReel(creatorId, {
+        title: uploadTitle.trim() || pendingFile.name.replace(/\.[^.]+$/, ''),
+        description: uploadDesc.trim() || 'Uploaded portfolio item',
+        category: uploadCategory,
+        thumbnailUrl: '', // Will show first frame or fallback
+        videoUrl: isVideo ? videoUrl : '',
+        metrics: { views: 0, likes: 0, comments: 0, engagementRate: 0 },
+        campaignId: null,
+      });
 
-      const hardcodedReel = {
-        id: 'hardcoded-dotandkey-reel',
-        title: 'Dot and Key Collaboration',
-        description: 'A fun and authentic collaboration with Dot & Key Skincare — showcasing their sunscreen range with a real daily-use review. Achieved over 120K organic views and 9.7% engagement rate.',
-        category: 'beauty',
-        thumbnailUrl: '',
-        videoUrl: '/instareel.mp4',
-        metrics: { views: 120000, likes: 9800, comments: 1200, engagementRate: 0.097 },
-        createdAt: '2024-03-15T10:00:00Z',
-        campaignId: 'camp-1',
-      };
+      // Synchronize sessionStorage allReels
+      const savedReels = localStorage.getItem(`reels-${creatorId}`);
+      if (savedReels) {
+        sessionStorage.setItem('allReels', savedReels);
+      }
 
-      const deduped = portfolioReels.filter((r) => r.id !== hardcodedReel.id);
-      reelsList = [hardcodedReel, ...deduped];
+      setPendingFile(null);
+      setShowUploadModal(false);
+      setToastMessage('Portfolio item uploaded successfully! 🎉');
+      setTimeout(() => setToastMessage(''), 4000);
+    } catch (err: any) {
+      console.error('Upload failed:', err);
+      alert(err.message || 'Failed to upload portfolio item.');
+    } finally {
+      setIsUploading(false);
     }
-
-    const updatedReels = [newReel, ...reelsList];
-    localStorage.setItem(`reels-${creatorId}`, JSON.stringify(updatedReels));
-    sessionStorage.setItem('allReels', JSON.stringify(updatedReels));
-
-    setPendingFile(null);
-    setShowUploadModal(false);
-    setToastMessage('Portfolio item uploaded successfully! 🎉');
-    setTimeout(() => setToastMessage(''), 4000);
   };
 
   const portfolios = [
@@ -329,6 +301,14 @@ export default function PortfolioPage() {
         <div className="fixed bottom-6 right-6 z-50 bg-[#1F1F1F] text-white font-bold px-6 py-3.5 rounded-2xl shadow-card flex items-center gap-2.5 animate-bounce">
           <span>🎉</span>
           {toastMessage}
+        </div>
+      )}
+
+      {/* ── UPLOADING SPINNER OVERLAY ── */}
+      {isUploading && (
+        <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-12 h-12 border-4 border-[#A8678A] border-t-transparent rounded-full animate-spin mb-4" />
+          <p className="text-white font-bold text-sm">Uploading and saving your portfolio item...</p>
         </div>
       )}
     </div>

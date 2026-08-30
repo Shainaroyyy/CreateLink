@@ -31,7 +31,7 @@ export async function register(email: string, password: string, role: UserRole, 
     passwordHash: `mock_hash_${password}`, // mock — no real hashing
     role,
     verificationStatus: 'unverified',
-    emailVerified: false,
+    emailVerified: true, // Default to true in mock environment to bypass email verification blockade
     createdAt: nowISO(),
     failedLoginAttempts: 0,
     lockedUntil: null,
@@ -70,14 +70,14 @@ export async function register(email: string, password: string, role: UserRole, 
   }
 
   // ── Auto-create a Brand profile when role is 'brand' ─────────────────────
-  if (role === 'brand' && profile) {
+  if (role === 'brand') {
     const brand: Brand = {
       id: `brand-${generateId()}`,
       userId: user.id,
-      companyName: profile.companyName || profile.name || 'Brand',
-      logoUrl: profile.logoUrl || '',
-      industry: profile.industry || '',
-      description: profile.description || '',
+      companyName: profile?.companyName || profile?.name || 'Brand',
+      logoUrl: profile?.logoUrl || '',
+      industry: profile?.industry || '',
+      description: profile?.description || '',
       brandScore: 0,
       brandScorePartialData: true,
       isNewToPlatform: true,
@@ -88,8 +88,23 @@ export async function register(email: string, password: string, role: UserRole, 
       verificationStatus: 'unverified',
     };
     store.brands.set(brand.id, brand);
-    // link campaigns array or other initial data if provided
   }
+
+  // Persist newly registered user/profile details to localStorage
+  try {
+    const initialUserIds = ['user-c1', 'user-c2', 'user-b1', 'user-b2'];
+    const customUsers = Array.from(store.users.values()).filter(u => !initialUserIds.includes(u.id));
+    localStorage.setItem('createlink-custom-users', JSON.stringify(customUsers));
+
+    const initialCreatorIds = ['creator-1', 'creator-2', 'creator-3', 'creator-4', 'creator-5', 'creator-6'];
+    const customCreators = Array.from(store.creators.values()).filter(c => !initialCreatorIds.includes(c.id));
+    localStorage.setItem('createlink-custom-creators', JSON.stringify(customCreators));
+
+    const initialBrandIds = ['brand-1', 'brand-2', 'brand-3'];
+    const customBrands = Array.from(store.brands.values()).filter(b => !initialBrandIds.includes(b.id));
+    localStorage.setItem('createlink-custom-brands', JSON.stringify(customBrands));
+  } catch (e) {}
+
   await sendVerificationEmail(user.id);
   return user;
 }

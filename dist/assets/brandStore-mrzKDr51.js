@@ -1,1 +1,0 @@
-import{l as e}from"./index-DLqws9RU.js";import{a as t,i as n,n as r,t as i}from"./brandService-Bhk42epo.js";var a=e(e=>({brand:null,loadBrand:async t=>{let n=await i(t);n||=await r(t),e({brand:n})},submitVerification:async n=>{e({brand:await t(n)})},publishCampaign:async(t,r)=>{let a=await n(t,r);return e({brand:await i(t)}),a}}));export{a as t};

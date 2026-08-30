@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react';
 import { getStore } from '../services/store';
 import type { Creator, Campaign, Application } from '../types/index';
 import { Link } from 'react-router-dom';
+import { fetchCampaigns } from '../services/campaignsService';
+import { fetchApplications } from '../services/applicationService';
 
 
-// Simple utility components â€” keep design consistent with app
+// Simple utility components — keep design consistent with app
 function ScorePill({ score }: { score: number }) {
   return (
     <div
@@ -72,6 +74,20 @@ export default function BrandDashboardPage() {
     setCreators(Array.from(store.creators.values()));
     setCampaigns(Array.from(store.campaigns.values()));
     setApplications(Array.from(store.applications.values()));
+
+    fetchCampaigns().then((campaignsList) => {
+      for (const c of campaignsList) {
+        store.campaigns.set(c.id, c);
+      }
+      setCampaigns(Array.from(store.campaigns.values()));
+    }).catch(err => console.warn('Failed to load campaigns for brand dashboard:', err));
+
+    fetchApplications().then((appsList) => {
+      for (const a of appsList) {
+        store.applications.set(a.id, a);
+      }
+      setApplications(Array.from(store.applications.values()));
+    }).catch(err => console.warn('Failed to load applications for brand dashboard:', err));
   }, []);
 
   // filters
@@ -187,6 +203,17 @@ export default function BrandDashboardPage() {
                   <div>
                     <div className="text-sm font-bold">{c.title}</div>
                     <div className="text-xs text-[#6E6A65]">Status: {c.status}</div>
+                    {(() => {
+                      const campApps = applications.filter(a => a.campaignId === c.id);
+                      const total = campApps.length;
+                      const shortlisted = campApps.filter(a => a.status === 'shortlisted' || a.status === 'waitlisted').length;
+                      const accepted = campApps.filter(a => a.status === 'accepted' || a.status === 'approved').length;
+                      return (
+                        <div className="text-[10px] text-[#A8678A] font-extrabold mt-1">
+                          Applicants: {total} | Shortlisted: {shortlisted} | Accepted: {accepted}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <Link to={`/brand/me/campaigns/${c.id}/review`} className="px-3 py-1 bg-[#F8EFF3] rounded-md text-xs font-bold">Review</Link>
                 </div>

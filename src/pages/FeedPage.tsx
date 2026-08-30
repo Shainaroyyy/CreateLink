@@ -12,6 +12,7 @@ import FeedCard from '../components/feed/FeedCard';
 import ApplicationForm from '../components/application/ApplicationForm';
 import CreatorApplicationForm from '../components/application/CreatorApplicationForm';
 import type { FeedPost, Campaign } from '../types/index';
+import { uploadReelFile, saveReel } from '../services/reelsService';
 
 // ── NEW: Creator post types ───────────────────────────────────────────────────
 type CreatorPostKind = 'hiring' | 'share_work';
@@ -174,7 +175,7 @@ function HiringModal({ authorName, authorAvatar, authorId, onPublish, onClose }:
 // ── NEW: Share Work Modal ─────────────────────────────────────────────────────
 interface ShareWorkModalProps {
   authorName: string; authorAvatar: string; authorId: string;
-  onPublish: (p: CreatorPost) => void; onClose: () => void;
+  onPublish: (p: CreatorPost, file?: File | null) => void; onClose: () => void;
 }
 function ShareWorkModal({ authorName, authorAvatar, authorId, onPublish, onClose }: ShareWorkModalProps) {
   const [title, setTitle] = useState('');
@@ -231,7 +232,7 @@ function ShareWorkModal({ authorName, authorAvatar, authorId, onPublish, onClose
       description: body.trim(),
       videoUrl: isVideo ? attachedFileBase64 : undefined,
       imageUrl: isImage ? attachedFileBase64 : undefined,
-    });
+    }, attachedFile);
   };
 
   return (
@@ -426,6 +427,7 @@ export default function FeedPage() {
 
   const [applyingPost, setApplyingPost] = useState<FeedPost | null>(null);
   const [successMessage, setSuccessMessage] = useState('');
+  const [isUploading, setIsUploading] = useState(false);
 
   useEffect(() => { loadFeed(); }, [loadFeed]);
 
@@ -511,37 +513,63 @@ export default function FeedPage() {
   const authorAvatar = '';
   const authorId = currentUser?.id ?? '';
 
-  const handlePublishCreatorPost = (p: CreatorPost) => {
+  const handlePublishCreatorPost = async (p: CreatorPost, rawFile?: File | null) => {
     if (p.kind === 'share_work') {
       const creatorId = creator?.id || (currentUser ? `creator-${currentUser.id}` : 'creator-1');
-      const savedReels = localStorage.getItem(`reels-${creatorId}`);
-      let reelsList: Reel[] = [];
-      if (savedReels) {
-        try { reelsList = JSON.parse(savedReels); } catch { }
-      }
-      const newReel: Reel = {
-        id: p.id,
-        title: p.title || 'Work Collaboration',
-        description: p.body || p.description || '',
-        category: creator?.contentCategories?.[0] || 'lifestyle',
-        thumbnailUrl: p.imageUrl || '',
-        videoUrl: p.videoUrl || '',
-        metrics: {
-          views: Math.floor(Math.random() * 8000) + 1200,
-          likes: Math.floor(Math.random() * 800) + 120,
-          comments: Math.floor(Math.random() * 80) + 12,
-          engagementRate: 0.07 + Math.random() * 0.05,
-        },
-        createdAt: p.createdAt,
-        campaignId: null,
-      };
-      const updatedReels = [newReel, ...reelsList];
-      localStorage.setItem(`reels-${creatorId}`, JSON.stringify(updatedReels));
-      sessionStorage.setItem('allReels', JSON.stringify(updatedReels));
+      setIsUploading(true);
+      try {
+        let finalVideoUrl = p.videoUrl || '';
+        let finalImageUrl = p.imageUrl || '';
 
-      setModal(null);
-      setSuccessMessage('Work successfully added to your profile! 🎉');
-      setTimeout(() => setSuccessMessage(''), 4000);
+        // 1. If there's a raw file, upload it to Supabase Storage
+        if (rawFile) {
+          try {
+            const uploadedUrl = await uploadReelFile(creatorId, rawFile);
+            if (rawFile.type.startsWith('video/')) {
+              finalVideoUrl = uploadedUrl;
+            } else if (rawFile.type.startsWith('image/')) {
+              finalImageUrl = uploadedUrl;
+            }
+          } catch (uploadErr) {
+            console.error('File upload to Supabase failed:', uploadErr);
+          }
+        }
+
+        // 2. Save metadata to Supabase DB
+        const saved = await saveReel(creatorId, {
+          title: p.title || 'Work Collaboration',
+          description: p.body || p.description || '',
+          category: creator?.contentCategories?.[0] || 'lifestyle',
+          thumbnailUrl: finalImageUrl,
+          videoUrl: finalVideoUrl,
+          metrics: {
+            views: Math.floor(Math.random() * 8000) + 1200,
+            likes: Math.floor(Math.random() * 800) + 120,
+            comments: Math.floor(Math.random() * 80) + 12,
+            engagementRate: 0.07 + Math.random() * 0.05,
+          },
+          campaignId: null,
+        });
+
+        // 3. Prepend to creatorPosts feed list
+        const updatedPost = {
+          ...p,
+          videoUrl: finalVideoUrl,
+          imageUrl: finalImageUrl,
+        };
+        const updatedPosts = [updatedPost, ...creatorPosts];
+        setCreatorPosts(updatedPosts);
+        localStorage.setItem('createlink-creator-posts', JSON.stringify(updatedPosts));
+
+        setModal(null);
+        setSuccessMessage('Work successfully added to your profile! 🎉');
+        setTimeout(() => setSuccessMessage(''), 4000);
+      } catch (err: any) {
+        console.error('Failed to publish work update:', err);
+        alert('Failed to publish work update.');
+      } finally {
+        setIsUploading(false);
+      }
     } else {
       const updatedPosts = [p, ...creatorPosts];
       setCreatorPosts(updatedPosts);
@@ -823,6 +851,14 @@ export default function FeedPage() {
               onSuccess={handleSuccessCreatorPost}
             />
           </div>
+        </div>
+      )}
+
+      {/* ── UPLOADING SPINNER OVERLAY ── */}
+      {isUploading && (
+        <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-12 h-12 border-4 border-[#A8678A] border-t-transparent rounded-full animate-spin mb-4" />
+          <p className="text-white font-bold text-sm">Uploading and publishing your work...</p>
         </div>
       )}
     </div>

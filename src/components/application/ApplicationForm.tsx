@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { Creator, Campaign, Application, PortfolioItem } from '../../types/index';
 import * as applicationService from '../../services/applicationService';
 import AIPitchPanel from './AIPitchPanel';
+import { fetchReels } from '../../services/reelsService';
 
 interface ApplicationFormProps {
   creator: Creator;
@@ -27,7 +28,7 @@ export function ApplicationForm({ creator, campaign, onClose, onSuccess }: Appli
   const minQualityMatch = reqStr.match(/Min Content Quality Score:\s*(\d+)/i);
   const minQuality = minQualityMatch ? parseInt(minQualityMatch[1]) : 0;
 
-  const [portfolioList] = useState<PortfolioItem[]>(() => {
+  const [portfolioList, setPortfolioList] = useState<PortfolioItem[]>(() => {
     const stored = localStorage.getItem(`reels-${creator.id}`) || sessionStorage.getItem('allReels');
     if (stored) {
       try {
@@ -75,8 +76,44 @@ export function ApplicationForm({ creator, campaign, onClose, onSuccess }: Appli
       const deduped = portfolioItems.filter(r => r.id !== hardcodedReel.id);
       return [hardcodedReel, ...deduped];
     }
-    return creator.portfolio;
+    return creator.portfolio.map(item => ({
+      ...item,
+      creatorId: creator.id
+    }));
   });
+
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      try {
+        const fetchedReels = await fetchReels(creator.id);
+        if (!active) return;
+        const mapped = fetchedReels.map(r => ({
+          id: r.id,
+          creatorId: creator.id,
+          title: r.title,
+          description: r.description,
+          category: r.category as any,
+          mediaUrl: r.thumbnailUrl || r.videoUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800',
+          fileSizeBytes: 0,
+          campaignId: r.campaignId,
+          metrics: {
+            views: r.metrics?.views ?? 0,
+            likes: r.metrics?.likes ?? 0,
+            comments: r.metrics?.comments ?? 0,
+            shares: 0,
+            engagementRate: r.metrics?.engagementRate ?? 0,
+          },
+          createdAt: r.createdAt
+        }));
+        setPortfolioList(mapped);
+      } catch (e) {
+        console.error("Failed to fetch reels in ApplicationForm:", e);
+      }
+    }
+    load();
+    return () => { active = false; };
+  }, [creator.id]);
 
   useEffect(() => {
     const initApplication = async () => {

@@ -144,7 +144,7 @@ export interface Campaign {
 // Task 2.4 — Application, feed, notification, and score types
 // =============================================================================
 
-export type ApplicationStatus = 'pending' | 'approved' | 'declined' | 'waitlisted';
+export type ApplicationStatus = 'pending' | 'shortlisted' | 'accepted' | 'rejected' | 'approved' | 'declined' | 'waitlisted';
 
 export interface Application {
   id: string;

@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../../stores/authStore';
 import { useNotificationStore } from '../../stores/notificationStore';
+import { fetchCampaigns } from '../../services/campaignsService';
+import { getStore } from '../../services/store';
+import { fetchApplications } from '../../services/applicationService';
 
 // sidebar widths
 const SIDEBAR_W   = 256; // px — expanded
@@ -17,7 +20,27 @@ export function AppLayout() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (currentUser) loadNotifications(currentUser.id);
+    if (currentUser) {
+      loadNotifications(currentUser.id);
+      
+      const store = getStore();
+      
+      fetchCampaigns().then((campaignsList) => {
+        for (const c of campaignsList) {
+          store.campaigns.set(c.id, c);
+        }
+      }).catch((err) => {
+        console.warn('Failed to preload campaigns:', err);
+      });
+
+      fetchApplications().then((appsList) => {
+        for (const a of appsList) {
+          store.applications.set(a.id, a);
+        }
+      }).catch((err) => {
+        console.warn('Failed to preload applications:', err);
+      });
+    }
   }, [currentUser, loadNotifications]);
 
   const handleLogout = () => { logout(); navigate('/login'); };

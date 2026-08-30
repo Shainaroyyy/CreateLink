@@ -1,6 +1,12 @@
 import type { Brand, Campaign, FeedPost, CampaignStatus } from '../types/index';
 import { getStore } from './store';
 import { generateId, nowISO, simulateLatency } from './mockUtils';
+import {
+  createCampaign,
+  updateCampaign as dbUpdateCampaign,
+  deleteCampaign as dbDeleteCampaign,
+  fetchCampaigns
+} from './campaignsService';
 
 export class BrandServiceError extends Error {
   code: string;
@@ -32,14 +38,8 @@ export async function publishCampaign(
     throw new BrandServiceError('score_restricted', 'Your Brand Score is below 40. Campaign publishing is restricted pending moderator review.');
   }
 
-  const campaign: Campaign = {
-    ...data,
-    id: generateId(),
-    brandId,
-    status: 'active',
-    publishedAt: nowISO(),
-    applicantCount: 0,
-  };
+  // Create campaign via campaignsService (writes to Supabase/localStorage fallback)
+  const campaign = await createCampaign(brandId, data);
   store.campaigns.set(campaign.id, campaign);
 
   // Create feed post for this campaign
@@ -71,7 +71,7 @@ export async function updateCampaign(campaignId: string, data: Partial<Campaign>
   const store = getStore();
   const campaign = store.campaigns.get(campaignId);
   if (!campaign) throw new BrandServiceError('not_found', 'Campaign not found.');
-  const updated: Campaign = { ...campaign, ...data };
+  const updated = await dbUpdateCampaign(campaignId, data);
   store.campaigns.set(campaignId, updated);
   return updated;
 }
@@ -81,7 +81,10 @@ export async function removeCampaign(campaignId: string): Promise<void> {
   const store = getStore();
   const campaign = store.campaigns.get(campaignId);
   if (!campaign) return;
+  
+  await dbDeleteCampaign(campaignId);
   store.campaigns.set(campaignId, { ...campaign, status: 'removed' as CampaignStatus });
+  
   // Mark associated feed post as removed
   for (const [id, post] of store.feedPosts.entries()) {
     if (post.campaignId === campaignId) {
@@ -104,5 +107,13 @@ export async function submitVerification(brandId: string): Promise<Brand> {
 
 export async function getCampaign(campaignId: string): Promise<Campaign | null> {
   await simulateLatency(100, 300);
-  return getStore().campaigns.get(campaignId) ?? null;
+  const store = getStore();
+  
+  // Sync store from backend
+  const campaignsList = await fetchCampaigns();
+  for (const c of campaignsList) {
+    store.campaigns.set(c.id, c);
+  }
+  
+  return store.campaigns.get(campaignId) ?? null;
 }

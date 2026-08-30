@@ -2,11 +2,53 @@ import type { FeedPost, FeedFilters } from '../types/index';
 import { getStore } from './store';
 import { generateId, nowISO, simulateLatency } from './mockUtils';
 import { createNotification } from './notificationService';
+import { fetchCampaigns } from './campaignsService';
 
 export async function loadFeed(filters?: Partial<FeedFilters>): Promise<FeedPost[]> {
   await simulateLatency(200, 600);
   const store = getStore();
-  let posts = Array.from(store.feedPosts.values()).filter((p) => !p.removed);
+
+  // 1. Fetch campaigns from Supabase/cache
+  const campaignsList = await fetchCampaigns();
+
+  // 2. Synchronize fetched campaigns to the in-memory store
+  for (const c of campaignsList) {
+    store.campaigns.set(c.id, c);
+  }
+
+  // 3. Get active campaigns (not removed)
+  const activeCampaigns = campaignsList.filter(c => c.status !== 'removed');
+
+  // 4. Creator posts (type is NOT 'campaign')
+  const creatorPosts = Array.from(store.feedPosts.values()).filter(
+    (p) => p.type !== 'campaign' && !p.removed
+  );
+
+  // 5. Map campaigns to FeedPost objects
+  const campaignPosts = activeCampaigns.map((c) => {
+    const existingPost = Array.from(store.feedPosts.values()).find(
+      (p) => p.campaignId === c.id
+    );
+
+    return {
+      id: existingPost?.id || `post-dyn-${c.id}`,
+      type: 'campaign' as const,
+      authorId: c.brandId,
+      authorRole: 'brand' as const,
+      campaignId: c.id,
+      title: c.title,
+      body: c.description,
+      category: c.contentCategories[0] ?? 'lifestyle',
+      collaborationMatchScore: existingPost?.collaborationMatchScore ?? null,
+      aiRecommendationTag: existingPost?.aiRecommendationTag ?? null,
+      publishedAt: c.publishedAt || new Date().toISOString(),
+      removed: existingPost?.removed ?? false,
+      imageFilename: existingPost?.imageFilename,
+    };
+  }).filter(p => !p.removed);
+
+  // 6. Merge posts
+  let posts = [...creatorPosts, ...campaignPosts];
 
   if (filters?.category) posts = posts.filter((p) => p.category === filters.category);
   if (filters?.deadlineBefore) {

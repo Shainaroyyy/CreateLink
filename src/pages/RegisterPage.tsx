@@ -20,19 +20,37 @@ export default function RegisterPage() {
   const { register } = useAuthStore();
   const navigate = useNavigate();
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    try {
-      const profile = role === 'brand' ? { companyName, industry, companySize, website } : { name, niche, platforms, audienceSize };
-      const user = await register(email, password, role, profile);
-      alert('Registration successful! Check your email to verify your account.');
-      if (role === 'brand') navigate('/brand/dashboard');
-      else navigate('/feed');
-    } catch (err) {
-      setError((err as Error).message || 'Registration failed');
-    }
-  };
+ const handleSubmit = async (e: React.FormEvent) => {
+  e.preventDefault();
+  setError("");
+
+  try {
+    const profile =
+      role === "brand"
+        ? {
+            companyName,
+            industry,
+            companySize,
+            website,
+          }
+        : {
+            name,
+            niche,
+            platforms,
+            audienceSize,
+          };
+
+    await register(email, password, role, profile);
+
+    alert(
+      "Verification email sent! Please check your inbox and verify your email before logging in."
+    );
+
+    navigate("/login");
+  } catch (err: any) {
+    setError(err.message);
+  }
+};
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-[#F6F2E8] text-[#1F1F1F] px-4 relative overflow-hidden">

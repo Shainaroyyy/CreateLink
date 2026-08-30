@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/authStore';
 import { useCreatorStore } from '../stores/creatorStore';
 import VerificationBadge from '../components/shared/VerificationBadge';
 import { getStore } from '../services/store';
+import { fetchReels, uploadReelFile, saveReel, deleteReel } from '../services/reelsService';
 
 // ── Reel type ─────────────────────────────────────────────────────────────────
 interface Reel {
@@ -747,6 +748,8 @@ export default function CreatorProfilePage() {
   const [activeTab, setActiveTab] = useState<'reels' | 'about' | 'reviews' | 'applied'>('reels');
   const [reels, setReels] = useState<Reel[]>([]);
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const [isInitialized, setIsInitialized] = useState(false);
   const [dragOverId, setDragOverId] = useState<string | null>(null);
   const [activeReel, setActiveReel] = useState<Reel | null>(null);
@@ -771,71 +774,41 @@ export default function CreatorProfilePage() {
     setIsInitialized(false);
   }, [profileId]);
 
-  // Seed reels from portfolio data or localStorage
+  // Fetch reels from reelsService (Supabase with localStorage fallback)
   useEffect(() => {
     if (!creator) return;
 
-    const savedReels = localStorage.getItem(`reels-${creator.id}`);
-    const savedPinned = localStorage.getItem(`pinned-${creator.id}`);
-
-    if (savedReels) {
+    let active = true;
+    const currentCreator = creator;
+    async function loadReels() {
       try {
-        const parsed = JSON.parse(savedReels) as Reel[];
-        setReels(parsed);
-      } catch (e) {
-        console.error('Failed to parse saved reels:', e);
+        const fetchedReels = await fetchReels(currentCreator.id, currentCreator.portfolio);
+        if (!active) return;
+        setReels(fetchedReels);
+
+        const savedPinned = localStorage.getItem(`pinned-${currentCreator.id}`);
+        if (savedPinned) {
+          try {
+            const parsed = JSON.parse(savedPinned) as string[];
+            setPinnedIds(parsed);
+          } catch (e) {
+            console.error('Failed to parse saved pinned:', e);
+          }
+        } else {
+          setPinnedIds([]);
+          localStorage.setItem(`pinned-${currentCreator.id}`, JSON.stringify([]));
+        }
+        setIsInitialized(true);
+      } catch (err) {
+        console.error('Failed to fetch reels:', err);
       }
-    } else {
-      // ── HARDCODED reel: Dot and Key Collaboration (only for creator-1 / Maya Chen) ──
-      const hardcodedReel: Reel = {
-        id: 'hardcoded-dotandkey-reel',
-        title: 'Dot and Key Collaboration',
-        description: 'A fun and authentic collaboration with Dot & Key Skincare — showcasing their sunscreen range with a real daily-use review. Achieved over 120K organic views and 9.7% engagement rate.',
-        category: 'beauty',
-        thumbnailUrl: '',          // no static thumbnail — video will show first frame
-        videoUrl: '/instareel.mp4',
-        metrics: { views: 120000, likes: 9800, comments: 1200, engagementRate: 0.097 },
-        createdAt: '2024-03-15T10:00:00Z',
-        campaignId: 'camp-1',
-      };
-
-      const portfolioReels: Reel[] = creator.portfolio.map((item) => ({
-        id: item.id,
-        title: item.title,
-        description: item.description,
-        category: item.category,
-        thumbnailUrl: item.mediaUrl,
-        videoUrl: '',
-        metrics: {
-          views: item.metrics.views,
-          likes: item.metrics.likes,
-          comments: item.metrics.comments,
-          engagementRate: item.metrics.engagementRate,
-        },
-        createdAt: item.createdAt,
-        campaignId: item.campaignId,
-      }));
-
-      // Put hardcoded reel first, then portfolio reels (deduplicated by id)
-      const deduped = portfolioReels.filter(r => r.id !== hardcodedReel.id);
-      const initialReels = [hardcodedReel, ...deduped];
-      setReels(initialReels);
-      localStorage.setItem(`reels-${creator.id}`, JSON.stringify(initialReels));
     }
 
-    if (savedPinned) {
-      try {
-        const parsed = JSON.parse(savedPinned) as string[];
-        setPinnedIds(parsed);
-      } catch (e) {
-        console.error('Failed to parse saved pinned:', e);
-      }
-    } else {
-      setPinnedIds([]);
-      localStorage.setItem(`pinned-${creator.id}`, JSON.stringify([]));
-    }
+    loadReels();
 
-    setIsInitialized(true);
+    return () => {
+      active = false;
+    };
   }, [creator]);
 
   const handleFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -849,27 +822,46 @@ export default function CreatorProfilePage() {
     e.target.value = '';
   };
 
-  const handleConfirmUpload = (meta: { title: string; description: string; category: string; thumbnailUrl: string }) => {
-    if (!pendingFile) return;
-    const blobUrl = URL.createObjectURL(pendingFile);
-    const newReel: Reel = {
-      id: `reel-${Date.now()}`,
-      title: meta.title,
-      description: meta.description || 'Uploaded reel',
-      category: meta.category,
-      thumbnailUrl: meta.thumbnailUrl,
-      videoUrl: blobUrl,
-      metrics: { views: 0, likes: 0, comments: 0, engagementRate: 0 },
-      createdAt: new Date().toISOString(),
-      campaignId: null,
-    };
-    setReels(prev => [newReel, ...prev]);
-    setPendingFile(null);
+  const handleConfirmUpload = async (meta: { title: string; description: string; category: string; thumbnailUrl: string }) => {
+    if (!pendingFile || !creator) return;
+    setIsUploading(true);
+    setUploadError('');
+    try {
+      // 1. Upload video to Supabase Storage
+      const videoUrl = await uploadReelFile(creator.id, pendingFile);
+
+      // 2. Save metadata to Supabase DB
+      const saved = await saveReel(creator.id, {
+        title: meta.title,
+        description: meta.description || 'Uploaded reel',
+        category: meta.category,
+        thumbnailUrl: meta.thumbnailUrl,
+        videoUrl,
+        metrics: { views: 0, likes: 0, comments: 0, engagementRate: 0 },
+        campaignId: null,
+      });
+
+      setReels(prev => [saved, ...prev]);
+      setPendingFile(null);
+    } catch (err: any) {
+      console.error('Upload failed:', err);
+      setUploadError(err.message || 'Failed to upload reel.');
+      alert(err.message || 'Failed to upload reel.');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
-  const handleDeleteReel = (reelId: string) => {
+  const handleDeleteReel = async (reelId: string) => {
     setReels(prev => prev.filter(r => r.id !== reelId));
     setPinnedIds(prev => prev.filter(id => id !== reelId));
+    if (creator) {
+      try {
+        await deleteReel(creator.id, reelId);
+      } catch (err) {
+        console.error('Failed to delete reel:', err);
+      }
+    }
   };
 
   const MAX_PINS = 6;
@@ -1514,6 +1506,14 @@ export default function CreatorProfilePage() {
           onConfirm={handleConfirmUpload}
           onCancel={() => setPendingFile(null)}
         />
+      )}
+
+      {/* ── UPLOADING SPINNER OVERLAY ── */}
+      {isUploading && (
+        <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-12 h-12 border-4 border-[#A8678A] border-t-transparent rounded-full animate-spin mb-4" />
+          <p className="text-white font-bold text-sm">Uploading and saving your reel...</p>
+        </div>
       )}
 
     </div>

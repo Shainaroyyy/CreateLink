@@ -4,6 +4,8 @@ import { generateId, nowISO, simulateLatency } from './mockUtils';
 import { computeCollaborationMatchScore } from '../lib/scoreEngine';
 import { generateAIPitch } from '../lib/aiMock';
 import { createNotification } from './notificationService';
+import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
+import { updateCampaign } from './campaignsService';
 
 export class ApplicationError extends Error {
   code: string;
@@ -13,6 +15,85 @@ export class ApplicationError extends Error {
   }
 }
 
+// Local storage key for fallback applications cache
+const LS_APPLICATIONS_KEY = 'createlink-applications';
+
+// Map database row to Application type
+export function mapRowToApplication(row: any): Application {
+  return {
+    id: row.id,
+    campaignId: row.campaign_id,
+    creatorId: row.creator_id,
+    aiPitch: row.ai_pitch || '',
+    editedPitch: row.edited_pitch || '',
+    selectedPortfolioItems: row.selected_portfolio_items || [],
+    status: row.status as ApplicationStatus,
+    collaborationMatchScore: row.collaboration_match_score || 0,
+    submittedAt: row.applied_at || row.submitted_at || new Date().toISOString(),
+    reviewedAt: row.reviewed_at || null,
+  };
+}
+
+// Map Application object to DB row fields
+export function mapApplicationToRow(app: Omit<Application, 'id' | 'submittedAt'> & { id?: string; submittedAt?: string }) {
+  return {
+    campaign_id: app.campaignId,
+    creator_id: app.creatorId,
+    status: app.status,
+    ai_pitch: app.aiPitch,
+    edited_pitch: app.editedPitch,
+    selected_portfolio_items: app.selectedPortfolioItems,
+    collaboration_match_score: app.collaborationMatchScore,
+    reviewed_at: app.reviewedAt,
+  };
+}
+
+// Load fallback local applications
+function getFallbackApplications(): Application[] {
+  const stored = localStorage.getItem(LS_APPLICATIONS_KEY);
+  if (stored) {
+    try {
+      return JSON.parse(stored) as Application[];
+    } catch {}
+  }
+  return [];
+}
+
+// Sync single application to local storage cache
+async function syncToLocalStorage(app: Application): Promise<void> {
+  const list = getFallbackApplications();
+  const filtered = list.filter(a => a.id !== app.id);
+  const updated = [app, ...filtered];
+  localStorage.setItem(LS_APPLICATIONS_KEY, JSON.stringify(updated));
+}
+
+/**
+ * Fetch all applications.
+ */
+export async function fetchApplications(): Promise<Application[]> {
+  if (isSupabaseConfigured) {
+    try {
+      const { data, error } = await supabase
+        .from('applications')
+        .select('*')
+        .order('applied_at', { ascending: false });
+
+      if (error) {
+        console.warn('Supabase applications fetch failed, using fallback:', error.message);
+      } else if (data) {
+        return data.map(mapRowToApplication);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch applications from Supabase:', e);
+    }
+  }
+
+  return getFallbackApplications();
+}
+
+/**
+ * Create a new creator application.
+ */
 export async function createApplication(
   creatorId: string,
   campaignId: string,
@@ -20,10 +101,11 @@ export async function createApplication(
 ): Promise<Application> {
   const store = getStore();
 
-  // Duplicate guard
-  const existing = Array.from(store.applications.values()).find(
+  // Duplicate guard (check backend/local storage)
+  const currentApps = await fetchApplications();
+  const existing = currentApps.find(
     (a) => a.creatorId === creatorId && a.campaignId === campaignId &&
-      (a.status === 'pending' || a.status === 'approved')
+      (a.status === 'pending' || a.status === 'accepted' || a.status === 'shortlisted' || a.status === 'approved' || a.status === 'waitlisted')
   );
   if (existing) throw new ApplicationError('duplicate', `Application already exists with status: ${existing.status}`);
 
@@ -61,8 +143,11 @@ export async function createApplication(
       .slice(0, 3)
       .map((item) => item.id);
 
+  const id = `app-${Date.now()}`;
+  const submittedAt = new Date().toISOString();
+
   const application: Application = {
-    id: generateId(),
+    id,
     campaignId,
     creatorId,
     aiPitch,
@@ -70,26 +155,72 @@ export async function createApplication(
     selectedPortfolioItems: selectedItems,
     status: 'pending',
     collaborationMatchScore: matchScore,
-    submittedAt: nowISO(),
+    submittedAt,
     reviewedAt: null,
   };
-  store.applications.set(application.id, application);
 
-  // Update creator collaboration history
-  const updatedCreator = store.creators.get(creatorId)!;
-  const alreadyInHistory = updatedCreator.collaborationHistory.some((r) => r.campaignId === campaignId);
-  if (!alreadyInHistory) {
-    store.creators.set(creatorId, {
-      ...updatedCreator,
-      collaborationHistory: [
-        ...updatedCreator.collaborationHistory,
-        { campaignId, brandId: campaign.brandId, status: 'pending', startDate: null, endDate: null },
-      ],
-    });
+  const dbRow = {
+    id,
+    ...mapApplicationToRow(application),
+    applied_at: submittedAt,
+  };
+
+  if (isSupabaseConfigured) {
+    try {
+      const { data, error } = await supabase
+        .from('applications')
+        .insert([dbRow])
+        .select()
+        .single();
+
+      if (error) {
+        console.warn('Supabase insert application failed, saving to cache:', error.message);
+      } else if (data) {
+        const saved = mapRowToApplication(data);
+        store.applications.set(saved.id, saved);
+        await syncToLocalStorage(saved);
+
+        // Update campaign applicantCount
+        const latestCampaign = store.campaigns.get(campaignId) || campaign;
+        const newCount = (latestCampaign.applicantCount || 0) + 1;
+        store.campaigns.set(campaignId, { ...latestCampaign, applicantCount: newCount });
+        try {
+          await updateCampaign(campaignId, { applicantCount: newCount });
+        } catch {}
+
+        return saved;
+      }
+    } catch (e) {
+      console.warn('Failed to save application to Supabase:', e);
+    }
   }
 
-  // Update applicantCount on campaign
-  store.campaigns.set(campaignId, { ...campaign, applicantCount: campaign.applicantCount + 1 });
+  // Local storage fallback
+  store.applications.set(application.id, application);
+  await syncToLocalStorage(application);
+
+  // Update campaign applicantCount
+  const latestCampaign = store.campaigns.get(campaignId) || campaign;
+  const newCount = (latestCampaign.applicantCount || 0) + 1;
+  store.campaigns.set(campaignId, { ...latestCampaign, applicantCount: newCount });
+  try {
+    await updateCampaign(campaignId, { applicantCount: newCount });
+  } catch {}
+
+  // Update creator collaboration history
+  const updatedCreator = store.creators.get(creatorId);
+  if (updatedCreator) {
+    const alreadyInHistory = updatedCreator.collaborationHistory.some((r) => r.campaignId === campaignId);
+    if (!alreadyInHistory) {
+      store.creators.set(creatorId, {
+        ...updatedCreator,
+        collaborationHistory: [
+          ...updatedCreator.collaborationHistory,
+          { campaignId, brandId: campaign.brandId, status: 'pending', startDate: null, endDate: null },
+        ],
+      });
+    }
+  }
 
   // Confirmation notification to creator
   const creatorUser = store.users.get(creator.userId);
@@ -100,6 +231,9 @@ export async function createApplication(
   return application;
 }
 
+/**
+ * Update creator's edited pitch and selected items.
+ */
 export async function updateApplication(
   appId: string,
   editedPitch: string,
@@ -109,11 +243,42 @@ export async function updateApplication(
   const store = getStore();
   const app = store.applications.get(appId);
   if (!app) throw new ApplicationError('not_found', 'Application not found.');
+  
   const updated: Application = { ...app, editedPitch, selectedPortfolioItems: portfolioItemIds.slice(0, 3) };
+
+  if (isSupabaseConfigured) {
+    try {
+      const { data, error } = await supabase
+        .from('applications')
+        .update({
+          edited_pitch: editedPitch,
+          selected_portfolio_items: portfolioItemIds.slice(0, 3),
+        })
+        .eq('id', appId)
+        .select()
+        .single();
+
+      if (error) {
+        console.warn('Supabase update application failed:', error.message);
+      } else if (data) {
+        const saved = mapRowToApplication(data);
+        store.applications.set(appId, saved);
+        await syncToLocalStorage(saved);
+        return saved;
+      }
+    } catch (e) {
+      console.warn('Failed to update application in Supabase:', e);
+    }
+  }
+
   store.applications.set(appId, updated);
+  await syncToLocalStorage(updated);
   return updated;
 }
 
+/**
+ * Process applicant swipe actions (Decline, Shortlist, Approve).
+ */
 export async function processSwipe(
   appId: string,
   direction: 'approve' | 'decline' | 'waitlist'
@@ -124,12 +289,38 @@ export async function processSwipe(
   if (!app) throw new ApplicationError('not_found', 'Application not found.');
 
   const statusMap: Record<typeof direction, ApplicationStatus> = {
-    approve: 'approved',
-    decline: 'declined',
-    waitlist: 'waitlisted',
+    approve: 'accepted',
+    decline: 'rejected',
+    waitlist: 'shortlisted',
   };
-  const updated: Application = { ...app, status: statusMap[direction], reviewedAt: nowISO() };
+  const status = statusMap[direction];
+  const reviewedAt = new Date().toISOString();
+  const updated: Application = { ...app, status, reviewedAt };
+
+  if (isSupabaseConfigured) {
+    try {
+      const { data, error } = await supabase
+        .from('applications')
+        .update({ status, reviewed_at: reviewedAt })
+        .eq('id', appId)
+        .select()
+        .single();
+
+      if (error) {
+        console.warn('Supabase swipe application update failed:', error.message);
+      } else if (data) {
+        const saved = mapRowToApplication(data);
+        store.applications.set(appId, saved);
+        await syncToLocalStorage(saved);
+        return saved;
+      }
+    } catch (e) {
+      console.warn('Failed to update swipe application in Supabase:', e);
+    }
+  }
+
   store.applications.set(appId, updated);
+  await syncToLocalStorage(updated);
 
   // Notify creator on approve/decline only
   if (direction !== 'waitlist') {
@@ -151,28 +342,106 @@ export async function processSwipe(
   return updated;
 }
 
+/**
+ * Undo swipe.
+ */
 export async function undoSwipe(appId: string, previousStatus: ApplicationStatus): Promise<Application> {
   await simulateLatency(100, 300);
   const store = getStore();
   const app = store.applications.get(appId);
   if (!app) throw new ApplicationError('not_found', 'Application not found.');
+  
   const restored: Application = { ...app, status: previousStatus, reviewedAt: null };
+
+  if (isSupabaseConfigured) {
+    try {
+      const { data, error } = await supabase
+        .from('applications')
+        .update({ status: previousStatus, reviewed_at: null })
+        .eq('id', appId)
+        .select()
+        .single();
+
+      if (error) {
+        console.warn('Supabase undoSwipe failed:', error.message);
+      } else if (data) {
+        const saved = mapRowToApplication(data);
+        store.applications.set(appId, saved);
+        await syncToLocalStorage(saved);
+        return saved;
+      }
+    } catch (e) {
+      console.warn('Failed to undo swipe in Supabase:', e);
+    }
+  }
+
   store.applications.set(appId, restored);
+  await syncToLocalStorage(restored);
   return restored;
 }
 
-export async function getApplicationsForCampaign(campaignId: string): Promise<Application[]> {
-  await simulateLatency(100, 400);
+/**
+ * Explicit status update (for table review actions).
+ */
+export async function updateApplicationStatus(appId: string, status: ApplicationStatus): Promise<Application> {
   const store = getStore();
-  return Array.from(store.applications.values()).filter((a) => a.campaignId === campaignId);
+  const app = store.applications.get(appId);
+  if (!app) throw new ApplicationError('not_found', 'Application not found.');
+
+  const reviewedAt = new Date().toISOString();
+  const updated: Application = { ...app, status, reviewedAt };
+
+  if (isSupabaseConfigured) {
+    try {
+      const { data, error } = await supabase
+        .from('applications')
+        .update({ status, reviewed_at: reviewedAt })
+        .eq('id', appId)
+        .select()
+        .single();
+
+      if (error) {
+        console.warn('Supabase update status failed:', error.message);
+      } else if (data) {
+        const saved = mapRowToApplication(data);
+        store.applications.set(appId, saved);
+        await syncToLocalStorage(saved);
+        return saved;
+      }
+    } catch (e) {
+      console.warn('Failed to update status in Supabase:', e);
+    }
+  }
+
+  store.applications.set(appId, updated);
+  await syncToLocalStorage(updated);
+  return updated;
 }
 
+/**
+ * Get applications for a campaign.
+ */
+export async function getApplicationsForCampaign(campaignId: string): Promise<Application[]> {
+  const store = getStore();
+  const appsList = await fetchApplications();
+  for (const a of appsList) {
+    store.applications.set(a.id, a);
+  }
+  return appsList.filter((a) => a.campaignId === campaignId);
+}
+
+/**
+ * Get applications by creator and campaign.
+ */
 export async function getApplicationByCreatorAndCampaign(
   creatorId: string,
   campaignId: string
 ): Promise<Application | null> {
   const store = getStore();
-  return Array.from(store.applications.values()).find(
-    (a) => a.creatorId === creatorId && a.campaignId === campaignId
-  ) ?? null;
+  const appsList = await fetchApplications();
+  for (const a of appsList) {
+    store.applications.set(a.id, a);
+  }
+  return appsList.find((a) => a.creatorId === creatorId && a.campaignId === campaignId) ?? null;
 }
+

@@ -1,10 +1,11 @@
-﻿// pl
+// pl
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { getStore } from '../services/store';
 import { useAuthStore } from '../stores/authStore';
 import type { Campaign, CompensationType, ContentCategory } from '../types/index';
+import { fetchCampaigns } from '../services/campaignsService';
 
 const COMP_TYPES: { value: CompensationType | 'all'; label: string }[] = [
   { value: 'all',          label: 'All' },
@@ -36,8 +37,22 @@ export default function CampaignsPage() {
   const [compFilter, setCompFilter] = useState<CompensationType | 'all'>('all');
   const [catFilter, setCatFilter]   = useState<ContentCategory | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('active');
+  const [campaignsList, setCampaignsList] = useState<Campaign[]>([]);
 
-  const allCampaigns = Array.from(store.campaigns.values());
+  useEffect(() => {
+    // Initial load from in-memory cache/seed
+    setCampaignsList(Array.from(store.campaigns.values()));
+
+    // Dynamic load from campaignsService (backend/cache)
+    fetchCampaigns().then((fetched) => {
+      for (const c of fetched) {
+        store.campaigns.set(c.id, c);
+      }
+      setCampaignsList(Array.from(store.campaigns.values()));
+    }).catch(err => console.warn('Failed to load campaigns:', err));
+  }, []);
+
+  const allCampaigns = campaignsList;
   const allBrands    = store.brands;
 
   const filtered = allCampaigns.filter(c => {
