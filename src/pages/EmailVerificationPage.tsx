@@ -5,6 +5,7 @@ import { useAuthStore } from '../stores/authStore';
 export default function EmailVerificationPage() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get('token');
+  const email = searchParams.get('email') ?? '';
   const navigate = useNavigate();
   const { verifyEmail, resendVerification } = useAuthStore();
 
@@ -18,7 +19,7 @@ export default function EmailVerificationPage() {
       const performVerification = async () => {
         setStatus('verifying');
         try {
-          await verifyEmail(token);
+          await verifyEmail(token, email || undefined);
           setStatus('success');
           // Automatically redirect after a short latency to the onboarding page
           setTimeout(() => {
