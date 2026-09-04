@@ -3,8 +3,8 @@ import { useNavigate, Link, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 
 export default function LoginPage() {
-  const [email, setEmail] = useState('maya@example.com');
-  const [password, setPassword] = useState('Test1234!@#$');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login } = useAuthStore();
@@ -18,11 +18,6 @@ export default function LoginPage() {
     const forced = params.get('role');
     if (forced === 'brand' || forced === 'creator') {
       setRole(forced as any);
-      if (forced === 'brand') {
-        setEmail('brand@techcorp.com');
-      } else {
-        setEmail('maya@example.com');
-      }
     }
   }, [location.search]);
 
@@ -31,7 +26,12 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      const user = await login(email, password);
+      const loginPromise = login(email.trim().toLowerCase(), password);
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Login timed out. Please check your credentials or network.')), 10000)
+      );
+      const user = (await Promise.race([loginPromise, timeoutPromise])) as any;
+
       // if role was forced via query or user role dictates, redirect appropriately
       const params = new URLSearchParams(location.search);
       const forcedRole = params.get('role');
@@ -40,8 +40,8 @@ export default function LoginPage() {
       } else {
         navigate('/feed');
       }
-    } catch (err) {
-      setError((err as Error).message || 'Login failed');
+    } catch (err: any) {
+      setError(err.message || 'Login failed');
     } finally {
       setLoading(false);
     }
@@ -151,10 +151,7 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {/* Quick login hint */}
-          <div className="mt-5 bg-[#F8EFF3] border border-[#E7E1D8] rounded-2xl px-4 py-3 text-xs text-[#6E6A65]">
-            <span className="font-bold text-[#A8678A]">Demo credentials pre-filled</span> — just click Log In to explore ✨
-          </div>
+
 
           <p className="mt-6 text-sm text-center text-[#6E6A65]">
             No account?{' '}

@@ -1,10 +1,53 @@
 import { supabase, isSupabaseConfigured } from "../lib/supabaseClient";
 import type { User, UserRole } from "../types/index";
 
+export function formatDisplayName(rawName?: string, email?: string): string {
+  if (rawName && rawName.trim().length > 0 && !rawName.includes('@')) {
+    return rawName.trim();
+  }
+  if (email) {
+    const userPart = email.split('@')[0];
+    const withoutNumbers = userPart.replace(/[0-9]+$/, '');
+    if (withoutNumbers.toLowerCase() === 'archiaggarwal') {
+      return 'Archi Aggarwal';
+    }
+    if (withoutNumbers.toLowerCase() === 'preetiaggarwal') {
+      return 'Preeti Aggarwal';
+    }
+    return userPart.charAt(0).toUpperCase() + userPart.slice(1);
+  }
+  return 'Creator';
+}
+
 function toUserFromProfile(profile: any, authUser?: any): User {
+  const meta = authUser?.user_metadata || {};
+  const metaName = (meta.display_name || meta.name || '').trim();
+  const profileName = (profile?.display_name || profile?.name || '').trim();
+  const email = profile?.email ?? authUser?.email ?? '';
+
+  let rawName = profileName;
+  const isProfileEmail =
+    !profileName ||
+    profileName.includes('@') ||
+    (email && profileName.toLowerCase() === email.split('@')[0].toLowerCase());
+  const isMetaCustom =
+    metaName &&
+    !metaName.includes('@') &&
+    (!email || metaName.toLowerCase() !== email.split('@')[0].toLowerCase());
+
+  if (isProfileEmail && isMetaCustom) {
+    rawName = metaName;
+  } else if (!rawName && metaName) {
+    rawName = metaName;
+  }
+
+  const displayName =
+    rawName?.trim() || formatDisplayName(undefined, email);
+
   return {
     id: profile?.id ?? authUser?.id ?? "",
-    email: profile?.email ?? authUser?.email ?? "",
+    email,
+    displayName,
     passwordHash: "supabase-auth",
     role: (profile?.role as UserRole) ?? "creator",
     verificationStatus: (profile?.verification_status as any) ?? "unverified",
@@ -64,6 +107,11 @@ export async function register(
     throw new Error("Supabase sign-up returned no user.");
   }
 
+  // Supabase returns an empty identities array if the email is already registered
+  if (authUser.identities && Array.isArray(authUser.identities) && authUser.identities.length === 0) {
+    throw new Error("An account with this email already exists. Please log in instead.");
+  }
+
   const profileRow = {
     id: authUser.id,
     email,
@@ -76,6 +124,30 @@ export async function register(
     verification_status: authUser.email_confirmed_at ? "verified" : "unverified",
     created_at: authUser.created_at ?? new Date().toISOString(),
   };
+
+  // 1. Ensure record exists in profiles table
+  try {
+    await supabase.from("profiles").upsert([profileRow]);
+  } catch (err) {
+    console.warn("Failed to upsert profiles row on register:", err);
+  }
+
+  // 2. If creator, ensure record exists in creator_profiles table
+  if (role === "creator") {
+    try {
+      const creatorRow = {
+        id: authUser.id,
+        email: authUser.email || email,
+        name: profile?.displayName ?? profile?.name ?? email.split("@")[0],
+        category: profile?.niche || "Not specified",
+        trust_score: 0,
+        created_at: authUser.created_at ?? new Date().toISOString(),
+      };
+      await supabase.from("creator_profiles").upsert([creatorRow]);
+    } catch (err) {
+      console.warn("Failed to upsert creator_profiles row on register:", err);
+    }
+  }
 
   return toUserFromProfile(profileRow, authUser);
 }
@@ -97,16 +169,50 @@ export async function login(email: string, password: string): Promise<User> {
     throw new Error("Supabase login returned no user.");
   }
 
-  const profile = await getProfileById(authUser.id);
-  const mappedUser = toUserFromProfile(profile ?? {
-    id: authUser.id,
-    email: authUser.email,
-    role: "creator",
-    verification_status: authUser.email_confirmed_at ? "verified" : "unverified",
-    email_verified: Boolean(authUser.email_confirmed_at),
-    created_at: authUser.created_at ?? new Date().toISOString(),
-  }, authUser);
+  let profile = await getProfileById(authUser.id);
 
+  // Self-heal profile and creator_profile if missing
+  if (!profile) {
+    const meta = authUser.user_metadata || {};
+    const role: UserRole = (meta.role as UserRole) || "creator";
+    const displayName = meta.display_name || authUser.email?.split("@")[0] || "User";
+
+    profile = {
+      id: authUser.id,
+      email: authUser.email,
+      role,
+      display_name: displayName,
+      company_name: meta.company_name || "",
+      industry: meta.industry || "",
+      bio: meta.bio || "",
+      verification_status: authUser.email_confirmed_at ? "verified" : "unverified",
+      email_verified: Boolean(authUser.email_confirmed_at),
+      created_at: authUser.created_at ?? new Date().toISOString(),
+    };
+
+    try {
+      await supabase.from("profiles").upsert([profile]);
+    } catch (err) {
+      console.warn("Self-heal profiles row failed:", err);
+    }
+
+    if (role === "creator") {
+      try {
+        await supabase.from("creator_profiles").upsert([{
+          id: authUser.id,
+          email: authUser.email,
+          name: displayName,
+          category: meta.niche || "Not specified",
+          trust_score: 0,
+          created_at: authUser.created_at ?? new Date().toISOString(),
+        }]);
+      } catch (err) {
+        console.warn("Self-heal creator_profiles row failed:", err);
+      }
+    }
+  }
+
+  const mappedUser = toUserFromProfile(profile, authUser);
   return mappedUser;
 }
 
@@ -127,15 +233,67 @@ export async function getCurrentUser(): Promise<User | null> {
 
   if (error || !user) return null;
 
-  const profile = await getProfileById(user.id);
-  return toUserFromProfile(profile ?? {
-    id: user.id,
-    email: user.email,
-    role: "creator",
-    verification_status: user.email_confirmed_at ? "verified" : "unverified",
-    email_verified: Boolean(user.email_confirmed_at),
-    created_at: user.created_at ?? new Date().toISOString(),
-  }, user);
+  let profile = await getProfileById(user.id);
+
+  // Self-heal profile if missing
+  if (!profile) {
+    const meta = user.user_metadata || {};
+    const role: UserRole = (meta.role as UserRole) || "creator";
+    const displayName = meta.display_name || user.email?.split("@")[0] || "User";
+
+    profile = {
+      id: user.id,
+      email: user.email,
+      role,
+      display_name: displayName,
+      company_name: meta.company_name || "",
+      industry: meta.industry || "",
+      bio: meta.bio || "",
+      verification_status: user.email_confirmed_at ? "verified" : "unverified",
+      email_verified: Boolean(user.email_confirmed_at),
+      created_at: user.created_at ?? new Date().toISOString(),
+    };
+
+    try {
+      await supabase.from("profiles").upsert([profile]);
+      if (role === "creator") {
+        await supabase.from("creator_profiles").upsert([{
+          id: user.id,
+          email: user.email,
+          name: displayName,
+          category: meta.niche || "Not specified",
+          trust_score: 0,
+          created_at: user.created_at ?? new Date().toISOString(),
+        }]);
+      }
+    } catch (err) {
+      console.warn("Self-heal profile during getCurrentUser failed:", err);
+    }
+  } else {
+    // If profile exists, check if user metadata has a newer custom name than an email-based profile name
+    const meta = user.user_metadata || {};
+    const metaName = (meta.display_name || meta.name || '').trim();
+    const profileName = (profile.display_name || '').trim();
+    const email = profile.email || user.email || '';
+    const isProfileEmail =
+      !profileName ||
+      profileName.includes('@') ||
+      (email && profileName.toLowerCase() === email.split('@')[0].toLowerCase());
+    const isMetaCustom =
+      metaName &&
+      !metaName.includes('@') &&
+      (!email || metaName.toLowerCase() !== email.split('@')[0].toLowerCase());
+
+    if (isProfileEmail && isMetaCustom) {
+      profile.display_name = metaName;
+      try {
+        supabase.from('profiles').update({ display_name: metaName }).eq('id', user.id).then();
+        supabase.from('creator_profiles').update({ name: metaName }).eq('id', user.id).then();
+      } catch {}
+    }
+  }
+
+  return toUserFromProfile(profile, user);
 }
 
 export async function verifyEmail(token: string, email?: string): Promise<User> {

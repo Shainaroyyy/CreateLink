@@ -5,6 +5,9 @@ import { useNotificationStore } from '../../stores/notificationStore';
 import { fetchCampaigns } from '../../services/campaignsService';
 import { getStore } from '../../services/store';
 import { fetchApplications } from '../../services/applicationService';
+import { searchCreators, initCreatorPresence } from '../../services/creatorService';
+import { getOrCreateConversation } from '../../services/messagingService';
+import type { Creator } from '../../types/index';
 
 // sidebar widths
 const SIDEBAR_W   = 256; // px — expanded
@@ -18,9 +21,67 @@ export function AppLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const searchContainerRef = useRef<HTMLDivElement>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Creator[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showSearchDropdown, setShowSearchDropdown] = useState(false);
+
+  // Realtime debounced creator search
+  useEffect(() => {
+    const q = searchQuery.trim();
+    setIsSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const results = await searchCreators(q);
+        setSearchResults(results);
+        if (q || showSearchDropdown) {
+          setShowSearchDropdown(true);
+        }
+      } catch (err) {
+        console.warn('Realtime search failed:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 120);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Close search dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
+        setShowSearchDropdown(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const handleStartChatWithCreator = async (creatorId: string) => {
+    if (!currentUser) {
+      navigate('/login');
+      return;
+    }
+    if (creatorId === currentUser.id) {
+      alert('You cannot start a conversation with yourself.');
+      return;
+    }
+    try {
+      const conv = await getOrCreateConversation(creatorId, currentUser.id);
+      setShowSearchDropdown(false);
+      setSearchQuery('');
+      navigate(`/messages?conversationId=${conv.id}`);
+    } catch (err) {
+      console.warn('Failed to start conversation:', err);
+      navigate('/messages');
+    }
+  };
 
   useEffect(() => {
     if (currentUser) {
+      const cleanupPresence = initCreatorPresence(currentUser);
       loadNotifications(currentUser.id);
       
       const store = getStore();
@@ -40,6 +101,10 @@ export function AppLayout() {
       }).catch((err) => {
         console.warn('Failed to preload applications:', err);
       });
+
+      return () => {
+        if (cleanupPresence) cleanupPresence();
+      };
     }
   }, [currentUser, loadNotifications]);
 
@@ -191,12 +256,12 @@ export function AppLayout() {
           {/* User profile */}
           <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-2'} px-3 py-2`}>
             <div className="w-7 h-7 rounded-full bg-[#A8678A] text-white flex items-center justify-center text-[11px] font-black shrink-0">
-              {currentUser?.email?.[0]?.toUpperCase() ?? 'U'}
+              {currentUser?.displayName?.[0]?.toUpperCase() || currentUser?.email?.[0]?.toUpperCase() || 'U'}
             </div>
             {!sidebarCollapsed && (
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-bold text-[#1F1F1F] truncate">
-                  {currentUser?.email?.split('@')[0] ?? 'User'}
+                  {currentUser?.displayName || currentUser?.email?.split('@')[0] || 'User'}
                 </p>
                 <p className="text-[10px] text-[#6E6A65] capitalize">{currentUser?.role}</p>
               </div>
@@ -254,8 +319,8 @@ export function AppLayout() {
               </button>
             )}
 
-            {/* ── Search bar — takes all available space ── */}
-            <div className="flex-1 relative">
+            {/* ── Search bar with Realtime Dropdown ── */}
+            <div ref={searchContainerRef} className="flex-1 relative">
               <svg
                 className="w-4 h-4 absolute left-4 top-1/2 -translate-y-1/2 text-[#9E9A97] pointer-events-none"
                 fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -264,10 +329,27 @@ export function AppLayout() {
               <input
                 ref={searchRef}
                 type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onFocus={async () => {
+                  if (searchResults.length === 0) {
+                    try {
+                      const results = await searchCreators(searchQuery);
+                      setSearchResults(results);
+                    } catch {}
+                  }
+                  setShowSearchDropdown(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && searchQuery.trim()) {
+                    setShowSearchDropdown(false);
+                    navigate(`/creators?search=${encodeURIComponent(searchQuery.trim())}`);
+                  }
+                }}
                 placeholder="Search creators, niches or keywords..."
                 className="
                   w-full h-10
-                  pl-11 pr-4
+                  pl-11 pr-16
                   bg-[#F6F2E8] border border-transparent
                   rounded-2xl
                   text-sm text-[#1F1F1F] placeholder-[#9E9A97]
@@ -275,10 +357,73 @@ export function AppLayout() {
                   transition-all duration-200
                 "
               />
-              {/* Keyboard shortcut hint */}
-              <kbd className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-[#E7E1D8] bg-white text-[10px] text-[#9E9A97] font-mono pointer-events-none select-none">
-                ⌘K
-              </kbd>
+              {isSearching ? (
+                <div className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-[#A8678A] border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <kbd className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-[#E7E1D8] bg-white text-[10px] text-[#9E9A97] font-mono pointer-events-none select-none">
+                  ↵ Enter
+                </kbd>
+              )}
+
+              {/* Realtime Search Results Dropdown */}
+              {showSearchDropdown && (
+                <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-[#E7E1D8] rounded-2xl shadow-[0_12px_32px_rgba(31,31,31,0.12)] max-h-96 overflow-y-auto z-50 p-2 space-y-1">
+                  {searchResults.length === 0 ? (
+                    <div className="py-6 text-center text-xs text-[#6E6A65]">
+                      No creators found matching "{searchQuery}"
+                    </div>
+                  ) : (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-[#A8678A] flex items-center justify-between">
+                        <span>Creators ({searchResults.length})</span>
+                        <span className="text-[#6E6A65] font-normal lowercase">press enter for all</span>
+                      </div>
+                      {searchResults.map((c) => (
+                        <div
+                          key={c.id}
+                          className="flex items-center justify-between p-2.5 rounded-xl hover:bg-[#F8EFF3] transition-colors group cursor-pointer"
+                          onClick={() => {
+                            setShowSearchDropdown(false);
+                            setSearchQuery('');
+                            navigate(`/creator/${c.id}`);
+                          }}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <img
+                              src={c.avatarUrl}
+                              alt={c.displayName}
+                              className="w-9 h-9 rounded-full object-cover border border-[#E7E1D8] bg-white shrink-0"
+                            />
+                            <div className="min-w-0">
+                              <p className="text-xs font-black text-[#1F1F1F] truncate group-hover:text-[#A8678A] transition-colors">
+                                {c.displayName}
+                              </p>
+                              <p className="text-[11px] text-[#6E6A65] truncate capitalize">
+                                {c.contentCategories.length > 0 ? c.contentCategories.join(', ') : 'Content Creator'}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleStartChatWithCreator(c.id);
+                              }}
+                              className="px-2.5 py-1 text-[11px] font-bold bg-[#1F1F1F] text-white rounded-lg hover:opacity-90 transition-opacity flex items-center gap-1 shadow-sm"
+                              title="Direct Message"
+                            >
+                              <span>Chat</span>
+                            </button>
+                            <span className="text-xs text-[#A8678A] font-bold pr-1">→</span>
+                          </div>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* ── Right action cluster ── */}
@@ -315,11 +460,11 @@ export function AppLayout() {
               <div className="relative group">
                 <button className="flex items-center gap-2 pl-1 pr-2 py-1 rounded-xl hover:bg-[#F8EFF3] transition-colors">
                   <div className="w-8 h-8 rounded-full bg-[#A8678A] text-white flex items-center justify-center text-xs font-black ring-2 ring-white shadow-sm select-none">
-                    {currentUser?.email?.[0]?.toUpperCase() ?? 'U'}
+                    {currentUser?.displayName?.[0]?.toUpperCase() || currentUser?.email?.[0]?.toUpperCase() || 'U'}
                   </div>
                   <div className="hidden sm:flex flex-col items-start leading-none">
-                    <span className="text-xs font-bold text-[#1F1F1F] max-w-[96px] truncate">
-                      {currentUser?.email?.split('@')[0] ?? 'User'}
+                    <span className="text-xs font-bold text-[#1F1F1F] max-w-[120px] truncate">
+                      {currentUser?.displayName || currentUser?.email?.split('@')[0] || 'User'}
                     </span>
                     <span className="text-[10px] text-[#9E9A97] capitalize mt-0.5">{currentUser?.role}</span>
                   </div>

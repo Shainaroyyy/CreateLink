@@ -1,286 +1,438 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useCreatorStore } from '../stores/creatorStore';
-import { getStore } from '../services/store';
-import type { Creator, ContentCategory, SocialAccount } from '../types/index';
 
-const CATEGORIES: ContentCategory[] = [
-  'beauty', 'fitness', 'tech', 'food', 'travel',
-  'gaming', 'lifestyle', 'finance', 'education', 'fashion'
+const CONTENT_TYPES = [
+  'Technology', 'Lifestyle', 'Beauty', 'Fashion', 'Fitness',
+  'Food', 'Travel', 'Gaming', 'Education', 'Finance',
+  'Comedy', 'Photography', 'Art & Design', 'Music', 'Parenting', 'Other'
 ];
 
-export default function CreatorOnboardingPage() {
+const PLATFORMS = [
+  'Instagram', 'YouTube', 'TikTok', 'LinkedIn', 'X (Twitter)', 'Twitch', 'Substack', 'Other'
+];
+
+const CONTENT_STYLES = [
+  'Educational', 'Entertaining', 'Storytelling', 'Reviews', 'Tutorials',
+  'Vlogs', 'Product-focused', 'Aesthetic', 'Short-form', 'Long-form', 'Humorous', 'Other'
+];
+
+const AUDIENCES = [
+  'Gen Z', 'Millennials', 'Students', 'Professionals', 'Parents',
+  'Fitness enthusiasts', 'Beauty enthusiasts', 'Tech enthusiasts',
+  'Entrepreneurs', 'General audience', 'Other'
+];
+
+const COLLAB_TYPES = [
+  'Sponsored posts', 'Product reviews', 'Affiliate collaborations',
+  'UGC (User Generated Content)', 'Long-term partnerships',
+  'Campaigns', 'Event collaborations', 'Brand Ambassador'
+];
+
+export default function CreatorOnboardingPage({
+  onComplete,
+  isModal = false
+}: {
+  onComplete?: () => void;
+  isModal?: boolean;
+}) {
   const { currentUser } = useAuthStore();
-  const { loadCreator } = useCreatorStore();
+  const { creator, loadCreator, saveOnboarding } = useCreatorStore();
   const navigate = useNavigate();
 
   const [step, setStep] = useState(1);
-  const [selectedCategories, setSelectedCategories] = useState<ContentCategory[]>([]);
-  const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>([
-    { platform: 'instagram', handle: '', followerCount: 0, connected: false },
-    { platform: 'tiktok', handle: '', followerCount: 0, connected: false },
-    { platform: 'youtube', handle: '', followerCount: 0, connected: false },
-  ]);
+  const [saving, setSaving] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  // Form states
   const [displayName, setDisplayName] = useState('');
+  const [location, setLocation] = useState('');
+  const [categories, setCategories] = useState<string[]>([]);
+  const [platforms, setPlatforms] = useState<string[]>([]);
+  const [contentStyle, setContentStyle] = useState<string[]>([]);
+  const [targetAudience, setTargetAudience] = useState<string[]>([]);
   const [bio, setBio] = useState('');
+  const [collabTypes, setCollabTypes] = useState<string[]>([]);
+  const [uniqueValue, setUniqueValue] = useState('');
 
-  const handleToggleCategory = (category: ContentCategory) => {
-    if (selectedCategories.includes(category)) {
-      setSelectedCategories(selectedCategories.filter((c) => c !== category));
-    } else {
-      setSelectedCategories([...selectedCategories, category]);
-    }
-  };
-
-  const handleSocialChange = (platform: string, field: 'handle' | 'followerCount', value: string) => {
-    setSocialAccounts(socialAccounts.map((account) => {
-      if (account.platform === platform) {
-        if (field === 'handle') {
-          return { ...account, handle: value, connected: !!value };
-        } else {
-          return { ...account, followerCount: parseInt(value) || 0 };
-        }
-      }
-      return account;
-    }));
-  };
-
-  const handleComplete = async (withTemplates: boolean) => {
+  // Load existing creator profile answers if available
+  useEffect(() => {
     if (!currentUser) return;
 
-    // Create the creator profile
-    const creator: Creator = {
-      id: currentUser.id,
-      userId: currentUser.id,
-      displayName: displayName || currentUser.email.split('@')[0],
-      bio: bio || 'Authentic content creator passionate about storytelling.',
-      avatarUrl: `https://api.dicebear.com/7.x/bottts/svg?seed=${currentUser.id}`,
-      contentCategories: selectedCategories,
-      socialAccounts: socialAccounts.filter((s) => s.connected),
-      trustScore: 80, // initial default trust score
-      trustScorePartialData: false,
-      portfolio: [],
-      collaborationHistory: [],
-      insights: {
-        audienceDemographics: {
-          ageGroups: { '18-24': 0.45, '25-34': 0.35, '35-44': 0.2 },
-          topCountries: ['USA', 'UK', 'Canada'],
-          genderSplit: { male: 40, female: 55, other: 5 },
-        },
-        primaryCategories: selectedCategories,
-        averageEngagementRate: 0.045,
-        collaborationCount: 0,
-        successRate: 1.0,
-      },
-      verificationStatus: 'unverified',
-    };
+    loadCreator(currentUser.id).then(() => {
+      // Prefill if data already exists in creator object or localStorage
+      try {
+        const cachedRaw = localStorage.getItem(`creator_onboarding_${currentUser.id}`);
+        const cached = cachedRaw ? JSON.parse(cachedRaw) : {};
 
-    // Save to the in-memory store
-    const store = getStore();
-    store.creators.set(currentUser.id, creator);
+        setDisplayName(cached.displayName || creator?.displayName || currentUser.email.split('@')[0]);
+        setLocation(cached.location || creator?.location || '');
+        setCategories(cached.categories || creator?.contentCategories || []);
+        setPlatforms(cached.platforms || creator?.platforms || []);
+        setContentStyle(cached.contentStyle || creator?.contentStyle || []);
+        setTargetAudience(cached.targetAudience || creator?.targetAudience || []);
+        setBio(cached.bio || creator?.bio || '');
+        setCollabTypes(cached.collabTypes || creator?.collabTypes || []);
+        setUniqueValue(cached.uniqueValue || creator?.uniqueValue || '');
+      } catch {}
+    });
+  }, [currentUser, loadCreator]);
 
-    // Refresh creator store
-    await loadCreator(currentUser.id);
-
-    if (withTemplates) {
-      navigate('/creator/me/ai-templates');
+  const toggleSelect = (list: string[], item: string, setter: (val: string[]) => void) => {
+    if (list.includes(item)) {
+      setter(list.filter((i) => i !== item));
     } else {
-      navigate('/creator/me/portfolio');
+      setter([...list, item]);
     }
   };
 
-  return (
-    <div className="min-h-[80vh] flex items-center justify-center text-[#1F1F1F] py-12 bg-[#F6F2E8]">
-      <div className="max-w-2xl w-full bg-white border border-[#E7E1D8] rounded-[20px] p-8 sm:p-12 shadow-card relative overflow-hidden">
-        {/* Glow removed */}
+  // Progressive saving on each step transition
+  const saveProgress = async (completed = false) => {
+    if (!currentUser) return;
+    setSaving(true);
+    setErrorMessage('');
 
-        {/* Step Indicator */}
-        <div className="flex items-center justify-between mb-8 relative z-10">
-          {[1, 2, 3].map((s) => (
-            <div key={s} className="flex items-center flex-1 last:flex-none">
-              <div
-                className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-sm transition-all duration-300 ${
-                  step === s
-                    ? 'bg-[#1F1F1F] text-white shadow-soft'
-                    : step > s
-                    ? 'bg-[#F8EFF3] text-[#A8678A] border border-[#E7E1D8]'
-                    : 'bg-white text-[#6E6A65] border border-[#E7E1D8]'
-                }`}
-              >
-                {step > s ? '✓' : s}
-              </div>
-              {s < 3 && (
-                <div
-                  className={`h-0.5 mx-4 flex-1 transition-all duration-300 ${
-                    step > s ? 'bg-[#A8678A]' : 'bg-[#E7E1D8]'
-                  }`}
-                ></div>
-              )}
-            </div>
-          ))}
+    try {
+      await saveOnboarding({
+        displayName,
+        location,
+        categories,
+        platforms,
+        contentStyle,
+        targetAudience,
+        bio,
+        collabTypes,
+        uniqueValue,
+        step,
+        completed,
+      });
+    } catch (err: any) {
+      console.warn('Progressive save error:', err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleNext = async () => {
+    // Validation per step
+    if (step === 1 && categories.length === 0) {
+      setErrorMessage('Please select at least one content category.');
+      return;
+    }
+    if (step === 2 && platforms.length === 0) {
+      setErrorMessage('Please select at least one platform you create on.');
+      return;
+    }
+    if (step === 3 && contentStyle.length === 0) {
+      setErrorMessage('Please select at least one content style.');
+      return;
+    }
+    if (step === 4 && targetAudience.length === 0) {
+      setErrorMessage('Please select your primary audience.');
+      return;
+    }
+    if (step === 5 && bio.trim().length < 10) {
+      setErrorMessage('Please write a short description about yourself (min. 10 characters).');
+      return;
+    }
+
+    setErrorMessage('');
+    await saveProgress(false);
+
+    if (step < 7) {
+      setStep((prev) => prev + 1);
+    } else {
+      // Finish onboarding
+      await saveProgress(true);
+      if (onComplete) {
+        onComplete();
+      } else {
+        navigate(`/creator/${currentUser?.id || 'me'}`);
+      }
+    }
+  };
+
+  const handleBack = () => {
+    setErrorMessage('');
+    if (step > 1) {
+      setStep((prev) => prev - 1);
+    }
+  };
+
+  const progressPercent = Math.round((step / 7) * 100);
+
+  return (
+    <div className={isModal ? 'w-full' : 'min-h-[85vh] flex items-center justify-center py-10 px-4 bg-[#F6F2E8]'}>
+      <div className={`w-full max-w-2xl bg-white border border-[#E7E1D8] rounded-[24px] p-6 sm:p-10 shadow-card ${isModal ? 'border-none p-0 shadow-none' : ''}`}>
+
+        {/* Progress Bar & Header */}
+        <div className="mb-6">
+          <div className="flex items-center justify-between text-xs font-bold text-[#6E6A65] mb-2">
+            <span>Step {step} of 7</span>
+            <span className="text-[#A8678A]">{progressPercent}% Completed</span>
+          </div>
+          <div className="w-full bg-[#E7E1D8] h-2 rounded-full overflow-hidden">
+            <div
+              className="bg-[#A8678A] h-full rounded-full transition-all duration-300 ease-out"
+              style={{ width: `${progressPercent}%` }}
+            />
+          </div>
         </div>
 
-        {/* Wizard Steps */}
-        <div className="relative z-10">
-          {step === 1 && (
+        {/* Question 1: Content Type / Niches */}
+        {step === 1 && (
+          <div className="space-y-4">
             <div>
-              <h2 className="text-3xl font-extrabold mb-2 text-[#1F1F1F]">
-                Create Your Profile
-              </h2>
-              <p className="text-[#6E6A65] mb-8">Tell us about yourself and select your niche categories.</p>
-
-              <div className="space-y-6">
-                <div>
-                  <label className="block text-sm font-semibold mb-2 text-[#1F1F1F]">Display Name</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. Creative Nomad"
-                    value={displayName}
-                    onChange={(e) => setDisplayName(e.target.value)}
-                    className="w-full bg-white border border-[#E7E1D8] rounded-xl px-4 py-3 text-[#1F1F1F] placeholder-[#6E6A65] focus:outline-none focus:ring-2 focus:ring-[#A8678A] focus:border-[#A8678A]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold mb-2 text-[#1F1F1F]">Bio / About</label>
-                  <textarea
-                    placeholder="Tell brands what makes your content unique..."
-                    value={bio}
-                    onChange={(e) => setBio(e.target.value)}
-                    rows={3}
-                    className="w-full bg-white border border-[#E7E1D8] rounded-xl px-4 py-3 text-[#1F1F1F] placeholder-[#6E6A65] focus:outline-none focus:ring-2 focus:ring-[#A8678A] focus:border-[#A8678A] resize-none"
-                  ></textarea>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold mb-3 text-[#1F1F1F]">Content Categories</label>
-                  <div className="flex flex-wrap gap-2.5">
-                    {CATEGORIES.map((cat) => {
-                      const selected = selectedCategories.includes(cat);
-                      return (
-                        <button
-                          key={cat}
-                          type="button"
-                          onClick={() => handleToggleCategory(cat)}
-                          className={`px-4 py-2 rounded-xl text-xs font-semibold uppercase tracking-wider border transition-all duration-200 ${
-                            selected
-                              ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A] shadow-soft'
-                              : 'bg-white border-[#E7E1D8] text-[#6E6A65] hover:border-[#A8678A] hover:text-[#1F1F1F]'
-                          }`}
-                        >
-                          {cat}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-8 flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => setStep(2)}
-                  disabled={!displayName || selectedCategories.length === 0}
-                  className="px-6 py-3 rounded-xl bg-[#1F1F1F] text-white font-bold disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90 transition-all duration-200"
-                >
-                  Continue to Socials
-                </button>
-              </div>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">What type of content do you create?</h2>
+              <p className="text-xs text-[#6E6A65]">Select all categories that match your content strategy.</p>
             </div>
-          )}
 
-          {step === 2 && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-2">
+              {CONTENT_TYPES.map((type) => {
+                const selected = categories.includes(type);
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => toggleSelect(categories, type, setCategories)}
+                    className={`py-3 px-3 rounded-xl border text-xs font-bold text-left transition-all ${
+                      selected
+                        ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A] shadow-soft scale-[1.02]'
+                        : 'bg-white border-[#E7E1D8] text-[#1F1F1F] hover:bg-[#FAF7F2]'
+                    }`}
+                  >
+                    <span className="mr-1.5">{selected ? '✓' : '+'}</span> {type}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Question 2: Platforms */}
+        {step === 2 && (
+          <div className="space-y-4">
             <div>
-              <h2 className="text-3xl font-extrabold mb-2 text-[#1F1F1F]">
-                Link Social Accounts
-              </h2>
-              <p className="text-[#6E6A65] mb-8">Enter your social handles and follower counts to link them (mocked).</p>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">Which platforms do you create content on?</h2>
+              <p className="text-xs text-[#6E6A65]">Where can brands and followers find your work?</p>
+            </div>
 
-              <div className="space-y-6">
-                {socialAccounts.map((account) => (
-                  <div key={account.platform} className="bg-[#F8EFF3] border border-[#E7E1D8] p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center gap-4">
-                    <span className="text-sm font-bold uppercase tracking-wider text-[#A8678A] w-24">
-                      {account.platform}
-                    </span>
-                    <input
-                      type="text"
-                      placeholder={`@handle`}
-                      value={account.handle}
-                      onChange={(e) => handleSocialChange(account.platform, 'handle', e.target.value)}
-                      className="flex-1 bg-white border border-[#E7E1D8] rounded-xl px-4 py-2 text-[#1F1F1F] placeholder-[#6E6A65] text-sm focus:outline-none focus:ring-2 focus:ring-[#A8678A] focus:border-[#A8678A]"
-                    />
-                    <input
-                      type="number"
-                      placeholder="Followers"
-                      value={account.followerCount || ''}
-                      onChange={(e) => handleSocialChange(account.platform, 'followerCount', e.target.value)}
-                      className="w-32 bg-white border border-[#E7E1D8] rounded-xl px-4 py-2 text-[#1F1F1F] placeholder-[#6E6A65] text-sm focus:outline-none focus:ring-2 focus:ring-[#A8678A] focus:border-[#A8678A]"
-                    />
-                  </div>
-                ))}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-2">
+              {PLATFORMS.map((platform) => {
+                const selected = platforms.includes(platform);
+                return (
+                  <button
+                    key={platform}
+                    type="button"
+                    onClick={() => toggleSelect(platforms, platform, setPlatforms)}
+                    className={`py-3 px-3 rounded-xl border text-xs font-bold text-left transition-all ${
+                      selected
+                        ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A] shadow-soft scale-[1.02]'
+                        : 'bg-white border-[#E7E1D8] text-[#1F1F1F] hover:bg-[#FAF7F2]'
+                    }`}
+                  >
+                    <span className="mr-1.5">{selected ? '✓' : '+'}</span> {platform}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Question 3: Content Style */}
+        {step === 3 && (
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">What is your content style?</h2>
+              <p className="text-xs text-[#6E6A65]">How would you describe the tone and format of your content?</p>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-2">
+              {CONTENT_STYLES.map((style) => {
+                const selected = contentStyle.includes(style);
+                return (
+                  <button
+                    key={style}
+                    type="button"
+                    onClick={() => toggleSelect(contentStyle, style, setContentStyle)}
+                    className={`py-3 px-3 rounded-xl border text-xs font-bold text-left transition-all ${
+                      selected
+                        ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A] shadow-soft scale-[1.02]'
+                        : 'bg-white border-[#E7E1D8] text-[#1F1F1F] hover:bg-[#FAF7F2]'
+                    }`}
+                  >
+                    <span className="mr-1.5">{selected ? '✓' : '+'}</span> {style}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Question 4: Primary Audience */}
+        {step === 4 && (
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">Who is your primary audience?</h2>
+              <p className="text-xs text-[#6E6A65]">Who engages most with your posts and videos?</p>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 pt-2">
+              {AUDIENCES.map((aud) => {
+                const selected = targetAudience.includes(aud);
+                return (
+                  <button
+                    key={aud}
+                    type="button"
+                    onClick={() => toggleSelect(targetAudience, aud, setTargetAudience)}
+                    className={`py-3 px-3 rounded-xl border text-xs font-bold text-left transition-all ${
+                      selected
+                        ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A] shadow-soft scale-[1.02]'
+                        : 'bg-white border-[#E7E1D8] text-[#1F1F1F] hover:bg-[#FAF7F2]'
+                    }`}
+                  >
+                    <span className="mr-1.5">{selected ? '✓' : '+'}</span> {aud}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Question 5: About You & Bio */}
+        {step === 5 && (
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">Tell us about yourself</h2>
+              <p className="text-xs text-[#6E6A65]">Introduce yourself to brands and summarize your creative mission.</p>
+            </div>
+
+            <div className="space-y-3 pt-2">
+              <div>
+                <label className="block text-xs font-bold text-[#6E6A65] uppercase tracking-wider mb-1">
+                  Creator / Display Name
+                </label>
+                <input
+                  type="text"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="e.g. Archi Aggarwal"
+                  className="w-full px-4 py-2.5 rounded-xl border border-[#E7E1D8] text-sm focus:outline-none focus:ring-2 focus:ring-[#A8678A]"
+                />
               </div>
 
-              <div className="mt-8 flex justify-between">
-                <button
-                  type="button"
-                  onClick={() => setStep(1)}
-                  className="px-6 py-3 rounded-xl bg-white border border-[#E7E1D8] text-[#1F1F1F] font-bold hover:bg-[#F8EFF3] transition-all duration-200"
-                >
-                  Back
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStep(3)}
-                  className="px-6 py-3 rounded-xl bg-[#1F1F1F] text-white font-bold hover:opacity-90 transition-all duration-200"
-                >
-                  Continue to Templates
-                </button>
+              <div>
+                <label className="block text-xs font-bold text-[#6E6A65] uppercase tracking-wider mb-1">
+                  Location (City, Country)
+                </label>
+                <input
+                  type="text"
+                  value={location}
+                  onChange={(e) => setLocation(e.target.value)}
+                  placeholder="e.g. Mumbai, India or London, UK"
+                  className="w-full px-4 py-2.5 rounded-xl border border-[#E7E1D8] text-sm focus:outline-none focus:ring-2 focus:ring-[#A8678A]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#6E6A65] uppercase tracking-wider mb-1">
+                  Short Bio / Description
+                </label>
+                <textarea
+                  rows={4}
+                  value={bio}
+                  onChange={(e) => setBio(e.target.value)}
+                  placeholder="Write a short bio describing your passion, storytelling style, and the themes you explore..."
+                  className="w-full px-4 py-3 rounded-xl border border-[#E7E1D8] text-sm focus:outline-none focus:ring-2 focus:ring-[#A8678A] resize-none"
+                />
               </div>
             </div>
-          )}
+          </div>
+        )}
 
-          {step === 3 && (
-            <div className="text-center py-4">
-              <h2 className="text-3xl font-extrabold mb-3 text-[#1F1F1F]">
-                Setup Portfolio Structure
-              </h2>
-              <p className="text-[#6E6A65] mb-8 max-w-lg mx-auto">
-                Would you like to generate AI portfolio templates based on your content category style? You can choose or customize them later.
-              </p>
-
-              <div className="flex flex-col gap-4 max-w-sm mx-auto">
-                <button
-                  type="button"
-                  onClick={() => handleComplete(true)}
-                  className="w-full py-4 rounded-xl bg-[#1F1F1F] text-white font-bold shadow-soft hover:opacity-90 transition-all duration-200 flex items-center justify-center gap-2"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904 9 21l8.982-11.795H13.62l1.317-7.705L6 13.205h5.132L9.813 15.904Z" />
-                  </svg>
-                  Generate AI Templates (Recommended)
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleComplete(false)}
-                  className="w-full py-3.5 rounded-xl bg-white border border-[#E7E1D8] text-[#1F1F1F] font-semibold hover:bg-[#F8EFF3] transition-all duration-200"
-                >
-                  Create Empty Portfolio
-                </button>
-              </div>
-
-              <div className="mt-8 flex justify-start">
-                <button
-                  type="button"
-                  onClick={() => setStep(2)}
-                  className="px-6 py-3 rounded-xl bg-white border border-[#E7E1D8] text-[#1F1F1F] font-bold hover:bg-[#F8EFF3] transition-all duration-200"
-                >
-                  Back
-                </button>
-              </div>
+        {/* Question 6: Brand Collaborations */}
+        {step === 6 && (
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">What kind of brand collaborations are you interested in?</h2>
+              <p className="text-xs text-[#6E6A65]">Select all collaboration formats you are excited to deliver.</p>
             </div>
-          )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
+              {COLLAB_TYPES.map((type) => {
+                const selected = collabTypes.includes(type);
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    onClick={() => toggleSelect(collabTypes, type, setCollabTypes)}
+                    className={`py-3 px-3.5 rounded-xl border text-xs font-bold text-left transition-all ${
+                      selected
+                        ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A] shadow-soft scale-[1.01]'
+                        : 'bg-white border-[#E7E1D8] text-[#1F1F1F] hover:bg-[#FAF7F2]'
+                    }`}
+                  >
+                    <span className="mr-2">{selected ? '✓' : '+'}</span> {type}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Question 7: Uniqueness / Value Proposition */}
+        {step === 7 && (
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-xl font-black text-[#1F1F1F] mb-1">What makes your content unique?</h2>
+              <p className="text-xs text-[#6E6A65]">Tell brands what makes your content, voice, or audience connection special.</p>
+            </div>
+
+            <div className="pt-2">
+              <textarea
+                rows={5}
+                value={uniqueValue}
+                onChange={(e) => setUniqueValue(e.target.value)}
+                placeholder="e.g. I break down complex concepts into engaging, highly relatable short reels with high retention. My community trusts my honest reviews and actively asks for recommendations."
+                className="w-full px-4 py-3 rounded-xl border border-[#E7E1D8] text-sm focus:outline-none focus:ring-2 focus:ring-[#A8678A] resize-none"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Validation Error */}
+        {errorMessage && (
+          <div className="mt-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-600 text-xs font-semibold">
+            {errorMessage}
+          </div>
+        )}
+
+        {/* Actions Row */}
+        <div className="flex items-center justify-between gap-3 mt-8 pt-6 border-t border-[#E7E1D8]">
+          <button
+            type="button"
+            onClick={handleBack}
+            disabled={step === 1 || saving}
+            className="px-5 py-2.5 rounded-xl border border-[#E7E1D8] text-xs font-bold text-[#1F1F1F] hover:bg-[#F8EFF3] transition-colors disabled:opacity-30 disabled:pointer-events-none"
+          >
+            ← Back
+          </button>
+
+          <button
+            type="button"
+            onClick={handleNext}
+            disabled={saving}
+            className="px-6 py-2.5 rounded-xl bg-[#1F1F1F] text-white text-xs font-bold hover:opacity-90 transition-all shadow-soft disabled:opacity-50 flex items-center gap-2"
+          >
+            {saving ? (
+              <span>Saving...</span>
+            ) : step === 7 ? (
+              <span>Complete Profile ✨</span>
+            ) : (
+              <span>Continue →</span>
+            )}
+          </button>
         </div>
       </div>
     </div>

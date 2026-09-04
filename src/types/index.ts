@@ -9,6 +9,7 @@ export type VerificationStatus = 'unverified' | 'pending' | 'verified';
 export interface User {
   id: string;
   email: string;
+  displayName?: string;
   passwordHash: string;
   role: UserRole;
   verificationStatus: VerificationStatus;
@@ -98,6 +99,14 @@ export interface Creator {
   collaborationHistory: CollaborationRecord[];
   insights: CreatorInsights;
   verificationStatus: VerificationStatus;
+  location?: string;
+  platforms?: string[];
+  contentStyle?: string[];
+  targetAudience?: string[];
+  collabTypes?: string[];
+  uniqueValue?: string;
+  onboardingCompleted?: boolean;
+  onboardingStep?: number;
 }
 
 // =============================================================================

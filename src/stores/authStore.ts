@@ -81,24 +81,74 @@ export const useAuthStore = create<AuthStore>((set) => ({
 if (isSupabaseConfigured) {
   supabase.auth.onAuthStateChange((_event, session) => {
     const user = session?.user ?? null;
-    const nextUser = user
-      ? {
-          id: user.id,
-          email: user.email ?? '',
-          passwordHash: 'supabase-auth',
-          role: 'creator',
-          verificationStatus: user.email_confirmed_at ? 'verified' : 'unverified',
-          emailVerified: Boolean(user.email_confirmed_at),
-          createdAt: user.created_at ?? new Date().toISOString(),
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-        }
-      : null;
+    if (!user) {
+      useAuthStore.setState({ currentUser: null, isAuthenticated: false });
+      return;
+    }
 
-    (useAuthStore as any).setState({
+    const meta = user.user_metadata || {};
+    const rawName = meta.display_name || meta.name || '';
+    const currentCached = useAuthStore.getState().currentUser;
+    const hasCustomCachedName = Boolean(
+      currentCached &&
+      currentCached.id === user.id &&
+      currentCached.displayName &&
+      !currentCached.displayName.includes('@')
+    );
+    const displayName =
+      rawName && rawName.trim().length > 0 && !rawName.includes('@')
+        ? rawName.trim()
+        : hasCustomCachedName
+        ? currentCached!.displayName
+        : authService.formatDisplayName(undefined, user.email);
+
+    // Immediate state set so auth completes synchronously with zero lock contention
+    const nextUser: User = {
+      id: user.id,
+      email: user.email ?? '',
+      displayName,
+      passwordHash: 'supabase-auth',
+      role: (meta.role as any) || 'creator',
+      verificationStatus: user.email_confirmed_at ? 'verified' : 'unverified',
+      emailVerified: Boolean(user.email_confirmed_at),
+      createdAt: user.created_at ?? new Date().toISOString(),
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+    };
+
+    useAuthStore.setState({
       currentUser: nextUser,
-      isAuthenticated: Boolean(user),
+      isAuthenticated: true,
     });
+
+    // Decouple database profile fetch to run after the auth lock is released
+    setTimeout(async () => {
+      try {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        if (profile) {
+          const current = useAuthStore.getState().currentUser;
+          if (current && current.id === user.id) {
+            const dbName = profile.display_name?.trim();
+            const resolvedName =
+              dbName && !dbName.includes('@') ? dbName : current.displayName;
+            useAuthStore.setState({
+              currentUser: {
+                ...current,
+                displayName: resolvedName,
+                role: (profile.role as any) || current.role,
+              },
+            });
+          }
+        }
+      } catch (err) {
+        console.warn('Background profile sync warning:', err);
+      }
+    }, 0);
   });
 
   (useAuthStore.getState() as any).hydrateFromSupabaseSession();

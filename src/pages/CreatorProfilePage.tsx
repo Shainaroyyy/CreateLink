@@ -6,6 +6,10 @@ import { useCreatorStore } from '../stores/creatorStore';
 import VerificationBadge from '../components/shared/VerificationBadge';
 import { getStore } from '../services/store';
 import { fetchReels, uploadReelFile, saveReel, deleteReel } from '../services/reelsService';
+import { computeProfileCompleteness, saveCreatorOnboarding, broadcastNameChange } from '../services/creatorService';
+import { getOrCreateConversation } from '../services/messagingService';
+import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
+import CreatorOnboardingPage from './CreatorOnboardingPage';
 
 // ── Reel type ─────────────────────────────────────────────────────────────────
 interface Reel {
@@ -443,8 +447,7 @@ function UploadModal({ file, defaultCategory, onConfirm, onCancel }: UploadModal
             {/* ── Video + thumbnail side by side ── */}
             <div className="flex gap-4 items-start justify-center">
               {/* Live video preview */}
-              <div className="shrink-0 rounded-2xl overflow-hidden"
-                style={{ width: 140, aspectRatio: '9/16', background: '#000', lineHeight: 0 }}>
+              <div className="shrink-0 rounded-2xl overflow-hidden w-[140px] aspect-[9/16] bg-black leading-none">
                <video
  ref={videoRef}
  src={previewUrl}
@@ -459,12 +462,11 @@ function UploadModal({ file, defaultCategory, onConfirm, onCancel }: UploadModal
               </div>
 
               {/* Thumbnail picker slot */}
-              <div className="shrink-0 rounded-2xl overflow-hidden border-2 border-dashed border-[#E7E1D8] hover:border-[#A8678A] cursor-pointer transition-colors flex items-center justify-center"
-                style={{ width: 140, aspectRatio: '9/16', background: '#F6F2E8', lineHeight: 0 }}
+              <div className="shrink-0 rounded-2xl overflow-hidden border-2 border-dashed border-[#E7E1D8] hover:border-[#A8678A] cursor-pointer transition-colors flex items-center justify-center w-[140px] aspect-[9/16] bg-[#F6F2E8] leading-none"
                 onClick={() => setShowFramePicker(true)}>
                 {thumbnailUrl ? (
                   <img src={thumbnailUrl} alt="thumbnail"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                    className="w-full h-full object-cover block" />
                 ) : (
                   <div className="flex flex-col items-center gap-2 p-3 text-center">
                     <svg className="w-7 h-7 text-[#A8678A]" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
@@ -745,7 +747,7 @@ export default function CreatorProfilePage() {
   const { creator, loadCreator } = useCreatorStore();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeTab, setActiveTab] = useState<'reels' | 'about' | 'reviews' | 'applied'>('reels');
+  const [activeTab, setActiveTab] = useState<'reels' | 'about' | 'trust' | 'reviews' | 'applied'>('reels');
   const [reels, setReels] = useState<Reel[]>([]);
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -756,17 +758,158 @@ export default function CreatorProfilePage() {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const uploadRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
+  const [showOnboardingModal, setShowOnboardingModal] = useState(false);
+  const [contacting, setContacting] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [savingName, setSavingName] = useState(false);
+  const [savedToast, setSavedToast] = useState(false);
 
   const profileId = id === 'me' ? currentUser?.id : id;
   const isOwnProfile = currentUser?.id === profileId || creator?.userId === currentUser?.id;
 
+  const handleStartEditName = () => {
+    setNameInput(creator?.displayName || '');
+    setEditingName(true);
+  };
+
+  const handleSaveName = async () => {
+    const trimmed = nameInput.trim();
+    if (!trimmed || !creator) return;
+    setSavingName(true);
+    try {
+      const targetId = currentUser?.id || creator.id;
+
+      // 1. Immediate optimistic local update so UI never reverts back
+      const optimisticCreator = { ...creator, displayName: trimmed };
+      useCreatorStore.setState({ creator: optimisticCreator });
+
+      // 2. Immediate auth store update so navbar updates with 0 delay
+      const current = useAuthStore.getState().currentUser;
+      if (current) {
+        useAuthStore.setState({
+          currentUser: { ...current, displayName: trimmed },
+        });
+      }
+
+      // 3. Persist to Supabase and cache
+      const updated = await saveCreatorOnboarding(targetId, { displayName: trimmed });
+      if (updated) {
+        useCreatorStore.setState({ creator: { ...updated, displayName: trimmed } });
+      }
+
+      // 4. Broadcast name change to Supabase presence
+      broadcastNameChange(targetId, trimmed);
+
+      setEditingName(false);
+    } catch (err) {
+      console.warn('Failed to update name:', err);
+      useCreatorStore.setState({
+        creator: { ...creator, displayName: trimmed },
+      });
+      setEditingName(false);
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const handleSaveProfile = async () => {
+    if (!creator) return;
+    setSavedToast(true);
+    try {
+      const targetId = currentUser?.id || creator.id;
+      await saveCreatorOnboarding(targetId, {
+        displayName: creator.displayName,
+        bio: creator.bio,
+        location: creator.location,
+        categories: creator.contentCategories,
+      });
+      const current = useAuthStore.getState().currentUser;
+      if (current && creator.displayName) {
+        useAuthStore.setState({
+          currentUser: { ...current, displayName: creator.displayName },
+        });
+      }
+      if (creator.displayName) {
+        broadcastNameChange(targetId, creator.displayName);
+      }
+    } catch (err) {
+      console.warn('handleSaveProfile error:', err);
+    }
+    setTimeout(() => setSavedToast(false), 2000);
+  };
+
+  const handleContactCreator = async () => {
+    if (!creator) return;
+    if (!currentUser) {
+      navigate('/login');
+      return;
+    }
+    if (creator.id === currentUser.id) {
+      alert("You cannot start a conversation with yourself.");
+      return;
+    }
+    setContacting(true);
+    try {
+      const conv = await getOrCreateConversation(creator.id, currentUser.id);
+      navigate(`/messages?conversationId=${conv.id}`);
+    } catch (err) {
+      console.warn('Failed to start chat with creator:', err);
+      navigate('/messages');
+    } finally {
+      setContacting(false);
+    }
+  };
+
   useEffect(() => {
-    if (!profileId) return;
+    if (!profileId) {
+      if (currentUser?.id) {
+        loadCreator(currentUser.id);
+      }
+      return;
+    }
     setLoading(true);
     setError('');
     loadCreator(profileId)
       .catch((err: unknown) => setError((err as Error).message || 'Failed to load profile.'))
       .finally(() => setLoading(false));
+  }, [profileId, currentUser?.id, loadCreator]);
+
+  // Realtime Supabase Subscription for profile updates
+  useEffect(() => {
+    if (!profileId || !isSupabaseConfigured) return;
+
+    const channel = supabase
+      .channel(`realtime:creator_profile_${profileId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'creator_profiles',
+          filter: `id=eq.${profileId}`,
+        },
+        () => {
+          loadCreator(profileId);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'profiles',
+          filter: `id=eq.${profileId}`,
+        },
+        () => {
+          loadCreator(profileId);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [profileId, loadCreator]);
 
   // Reset initialization state on profileId change to prevent sync collisions
@@ -929,13 +1072,22 @@ export default function CreatorProfilePage() {
   }
 
   if (error || !creator) {
+    if (isOwnProfile && currentUser) {
+      return (
+        <div className="flex flex-col items-center justify-center py-32">
+          <div className="w-8 h-8 border-4 border-[#A8678A] border-t-transparent rounded-full animate-spin mb-3" />
+          <p className="text-[#6E6A65] text-sm font-medium">Setting up your profile...</p>
+        </div>
+      );
+    }
+
     return (
       <div className="text-center py-24 bg-white border border-[#E7E1D8] rounded-[20px] shadow-card">
         <div className="text-5xl mb-4">😕</div>
         <p className="text-[#1F1F1F] font-bold text-lg mb-1">{error || 'Profile not found'}</p>
         <p className="text-[#6E6A65] text-sm mb-6">We couldn't find this creator's profile.</p>
-        <Link to="/feed" className="inline-block px-6 py-2.5 bg-[#1F1F1F] text-white font-bold text-sm rounded-2xl shadow-soft hover:opacity-90">
-          ← Back to Feed
+        <Link to="/creators" className="inline-block px-6 py-2.5 bg-[#1F1F1F] text-white font-bold text-sm rounded-2xl shadow-soft hover:opacity-90">
+          ← Discover Creators
         </Link>
       </div>
     );
@@ -944,362 +1096,269 @@ export default function CreatorProfilePage() {
   const totalFollowers = creator.socialAccounts.reduce((s, a) => s + a.followerCount, 0);
   const dem = creator.insights.audienceDemographics;
   const connectedPlatforms = creator.socialAccounts.filter(a => a.connected);
-
-  // Mock recent collaborations (from history + brand names)
-  const recentCollabs = [
-    { name: 'Samsung',    logo: 'https://api.dicebear.com/7.x/initials/svg?seed=Samsung&backgroundType=gradientLinear', date: 'May 2024', bg: 'bg-blue-100' },
-    { name: 'Sephora',    logo: 'https://api.dicebear.com/7.x/initials/svg?seed=Sephora', date: 'Apr 2024', bg: 'bg-slate-900' },
-    { name: 'Lululemon',  logo: 'https://api.dicebear.com/7.x/initials/svg?seed=Lululemon', date: 'Mar 2024', bg: 'bg-red-100' },
-    { name: 'Glossier',   logo: 'https://api.dicebear.com/7.x/initials/svg?seed=Glossier', date: 'Feb 2024', bg: 'bg-pink-50' },
-  ];
+  const completeness = computeProfileCompleteness(creator);
 
   return (
     <div className="space-y-3.5 pb-6 max-w-5xl mx-auto">
 
       {/* ── HERO CARD ──────────────────────────────────────────────────── */}
-      <div className="rounded-[20px] overflow-hidden shadow-card border border-[#E7E1D8]"
-        style={{ background: '#F8EFF3' }}>
-
+      <div className="rounded-[20px] overflow-hidden shadow-card border border-[#E7E1D8] bg-[#F8EFF3]">
         {/* Top area: avatar + name + CTAs */}
-        <div className="px-6 pt-5 pb-0 flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+        <div className="px-6 pt-6 pb-2 flex flex-col sm:flex-row gap-5 items-start sm:items-center">
           {/* Avatar with online dot */}
           <div className="relative shrink-0">
-            <img src={creator.avatarUrl} alt={creator.displayName}
-              className="w-24 h-24 rounded-full border-4 border-white shadow-soft object-cover bg-white" />
-            <span className="absolute bottom-2 right-2 w-4 h-4 rounded-full bg-emerald-400 border-2 border-white" />
+            <img
+              src={creator.avatarUrl}
+              alt={creator.displayName}
+              className="w-24 h-24 rounded-full border-4 border-white shadow-soft object-cover bg-white"
+            />
+            <span className="absolute bottom-1 right-1 w-4 h-4 rounded-full bg-emerald-400 border-2 border-white shadow-sm" />
           </div>
 
-          {/* Name block */}
+          {/* Name & Details Block */}
           <div className="flex-1 min-w-0">
-            <div className="flex flex-wrap items-center gap-2.5 mb-1">
-              <h1 className="text-2xl font-black text-[#1F1F1F]">{creator.displayName}</h1>
-              <VerificationBadge status={creator.verificationStatus} size="sm" />
-            </div>
-            <p className="text-[#6E6A65] text-sm mb-1.5">{creator.contentCategories.map(c => c.charAt(0).toUpperCase() + c.slice(1)).join(' & ')} Creator</p>
-            <p className="text-[#6E6A65] text-xs flex items-center gap-1 mb-2.5">
-              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            {editingName ? (
+              <div className="flex items-center gap-2 mb-2 max-w-md">
+                <input
+                  type="text"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  placeholder="Enter full name"
+                  className="px-3 py-1.5 bg-white border border-[#A8678A] rounded-xl text-sm font-bold text-[#1F1F1F] focus:outline-none ring-2 ring-[#A8678A]/20 flex-1"
+                  autoFocus
+                />
+                <button
+                  onClick={handleSaveName}
+                  disabled={savingName}
+                  className="px-3.5 py-1.5 bg-[#1F1F1F] text-white text-xs font-bold rounded-xl hover:opacity-90 transition-opacity"
+                >
+                  {savingName ? 'Saving...' : 'Save'}
+                </button>
+                <button
+                  onClick={() => setEditingName(false)}
+                  className="px-2.5 py-1.5 text-xs text-[#6E6A65] font-semibold hover:text-[#1F1F1F]"
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2.5 mb-1">
+                <h1 className="text-2xl sm:text-3xl font-black text-[#1F1F1F] tracking-tight">
+                  {creator.displayName}
+                </h1>
+                <VerificationBadge status={creator.verificationStatus} size="sm" />
+                {isOwnProfile && (
+                  <button
+                    onClick={handleStartEditName}
+                    className="p-1.5 text-[#6E6A65] hover:text-[#A8678A] hover:bg-white/80 rounded-lg transition-colors"
+                    title="Change Display Name"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            )}
+
+            <p className="text-[#6E6A65] text-sm mb-1.5 font-medium">
+              {creator.contentCategories.length > 0
+                ? `${creator.contentCategories.map((c) => c.charAt(0).toUpperCase() + c.slice(1)).join(' • ')} Creator`
+                : 'Content Creator'}
+            </p>
+
+            <p className="text-[#6E6A65] text-xs flex items-center gap-1 mb-2">
+              <svg className="w-3.5 h-3.5 text-[#A8678A]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
                 <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
               </svg>
-              San Francisco, CA
+              <span>{creator.location && creator.location !== 'Not specified' ? creator.location : 'Location: Not specified'}</span>
             </p>
-            {creator.bio && (
-              <p className="text-xs text-[#6E6A65] mb-2.5 line-clamp-2 max-w-xl">{creator.bio}</p>
-            )}
+
+            <p className="text-xs text-[#6E6A65] mb-3 line-clamp-2 max-w-xl leading-relaxed">
+              {creator.bio || 'Ready for high-impact brand sponsorships and collaborations.'}
+            </p>
 
             {/* Category tags */}
             <div className="flex flex-wrap gap-1.5">
-              {creator.contentCategories.map((cat) => (
-                <span key={cat} className={`px-3 py-0.5 rounded-full text-xs font-bold capitalize ${CAT_COLORS[cat] ?? 'bg-slate-100 text-slate-600'}`}>
-                  {cat}
+              {creator.contentCategories.length > 0 ? (
+                creator.contentCategories.map((cat) => (
+                  <span
+                    key={cat}
+                    className={`px-3 py-0.5 rounded-full text-xs font-bold capitalize ${
+                      CAT_COLORS[cat] ?? 'bg-slate-100 text-slate-600'
+                    }`}
+                  >
+                    {cat}
+                  </span>
+                ))
+              ) : (
+                <span className="px-3 py-0.5 rounded-full text-xs font-semibold bg-white/70 text-[#A8678A] border border-[#E7E1D8]">
+                  Content Type: Not specified yet
                 </span>
-              ))}
-              {creator.contentCategories.length > 2 && (
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#F8EFF3] text-[#A8678A]">+2</span>
               )}
             </div>
           </div>
 
-          {/* Social icons */}
-          <div className="hidden sm:flex items-center gap-2 shrink-0">
-            {creator.socialAccounts.map((acc, i) => (
-              <div key={i} className="w-8 h-8 rounded-full bg-white shadow-soft border border-[#E7E1D8] flex items-center justify-center">
-                {PLATFORM_SVG[acc.platform] ?? <span className="text-xs">🔗</span>}
-              </div>
-            ))}
-            <div className="w-8 h-8 rounded-full bg-white shadow-soft border border-[#E7E1D8] flex items-center justify-center">
-              <svg className="w-4 h-4 text-[#6E6A65]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
-              </svg>
-            </div>
-          </div>
-
-          {/* CTA Buttons */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Single Primary Action Cluster */}
+          <div className="flex items-center gap-2 shrink-0 sm:self-center">
             {isOwnProfile ? (
-              <Link to="/creator/me/portfolio"
-                className="px-4 py-2 bg-[#1F1F1F] text-white font-bold text-xs rounded-xl shadow-soft hover:opacity-90 transition-opacity">
-                ✏️ Edit Profile
-              </Link>
+              <button
+                onClick={() => setShowOnboardingModal(true)}
+                className="px-5 py-2.5 bg-[#1F1F1F] text-white font-bold text-xs rounded-xl shadow-soft hover:opacity-90 transition-opacity flex items-center gap-1.5"
+              >
+                {creator.onboardingCompleted ? '✏️ Edit Profile' : '✨ Personalize Profile'}
+              </button>
             ) : (
-              <button className="px-5 py-2 bg-[#1F1F1F] text-white font-bold text-xs rounded-xl shadow-soft hover:opacity-90 transition-opacity">
-                Contact Creator
+              <button
+                onClick={handleContactCreator}
+                disabled={contacting}
+                className="px-6 py-2.5 bg-[#1F1F1F] text-white font-bold text-xs rounded-xl shadow-soft hover:opacity-90 transition-opacity flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {contacting ? (
+                  <span>Connecting...</span>
+                ) : (
+                  <>
+                    <span>💬</span>
+                    <span>Contact Creator</span>
+                  </>
+                )}
               </button>
             )}
-            <button className="px-4 py-2 bg-white border border-[#E7E1D8] text-[#1F1F1F] font-bold text-xs rounded-xl hover:bg-[#F8EFF3] transition-colors flex items-center gap-1.5">
+
+            <button
+              onClick={handleSaveProfile}
+              className="px-4 py-2.5 bg-white border border-[#E7E1D8] text-[#1F1F1F] font-bold text-xs rounded-xl hover:bg-white/80 transition-colors flex items-center gap-1.5 shadow-sm"
+            >
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2.2" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" />
               </svg>
-              Save Profile
+              <span>{savedToast ? 'Saved ✓' : 'Save'}</span>
             </button>
           </div>
         </div>
 
-        {/* Mini stats row + Worked With Brands */}
-        <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-2.5 border-t border-[#E7E1D8] mt-4">
-          <div className="flex flex-wrap gap-5">
-            {[
-              { icon: '🎯', value: '5+ Years', label: 'Experience' },
-              { icon: '🏷️', value: '150+ Brands', label: 'Collaborated' },
-              { icon: '⭐', value: 'Top 5%', label: 'Ranked Creator' },
-            ].map(({ icon, value, label }) => (
-              <div key={label} className="flex items-center gap-2">
-                <span className="text-sm">{icon}</span>
-                <div>
-                  <p className="text-xs font-black text-[#1F1F1F] leading-tight">{value}</p>
-                  <p className="text-[10px] text-[#6E6A65]">{label}</p>
+        {/* Real Profile Highlights / Status Bar */}
+        <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-3 border-t border-[#E7E1D8] mt-4 bg-white/40">
+          <div className="flex flex-wrap items-center gap-6">
+            <div className="flex items-center gap-2">
+              <span className="text-sm">🎯</span>
+              <div>
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-black text-[#1F1F1F] leading-tight">{completeness}%</p>
+                  <div className="w-14 h-1.5 bg-[#E7E1D8] rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[#A8678A] rounded-full transition-all"
+                      style={{ width: `${completeness}%` }}
+                    />
+                  </div>
                 </div>
+                <p className="text-[10px] text-[#6E6A65]">Profile Strength</p>
               </div>
-            ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm">🛡️</span>
+              <div>
+                <p className="text-xs font-black text-[#1F1F1F] leading-tight">
+                  {creator.trustScore > 0 ? `${creator.trustScore} / 100` : 'New Creator'}
+                </p>
+                <p className="text-[10px] text-[#6E6A65]">Trust Score</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm">🎬</span>
+              <div>
+                <p className="text-xs font-black text-[#1F1F1F] leading-tight">{reels.length} Reels</p>
+                <p className="text-[10px] text-[#6E6A65]">Portfolio</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm">👥</span>
+              <div>
+                <p className="text-xs font-black text-[#1F1F1F] leading-tight">
+                  {totalFollowers > 0 ? fmtNum(totalFollowers) : '0'}
+                </p>
+                <p className="text-[10px] text-[#6E6A65]">Followers</p>
+              </div>
+            </div>
           </div>
 
-          {/* Worked With Brands */}
-          <div className="flex items-center gap-2 pt-1 sm:pt-0">
-            <span className="text-[10px] font-bold text-[#6E6A65] uppercase tracking-wider">Worked With:</span>
-            <div className="flex items-center gap-1.5">
-              {recentCollabs.map((brand) => (
-                <img key={brand.name} src={brand.logo} alt={brand.name}
-                  className="w-6 h-6 rounded-full border border-[#E7E1D8] bg-white object-cover shadow-sm hover:scale-110 transition-transform duration-200"
-                  title={brand.name} />
-              ))}
-            </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold text-[#6E6A65] uppercase tracking-wider">Status:</span>
+            <span className="text-xs font-semibold text-[#1F1F1F] bg-white px-2.5 py-0.5 rounded-full border border-[#E7E1D8]">
+              {creator.onboardingCompleted ? 'Active Profile' : 'Setting Up'}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* ── STAT CARDS ROW ─────────────────────────────────────────────── */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      {/* ── COMPACT 4-METRIC STRIP ────────────────────────────────────────── */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
           {
             label: 'Trust Score',
             value: String(creator.trustScore),
+            ariaLabel: `Trust Score: ${creator.trustScore} out of 100`,
             valueColor: 'text-[#A8678A]',
           },
           {
-            label: 'Content Quality Score',
-            value: '94%',
-            valueColor: 'text-[#A8678A]',
-            tooltip: 'Calculated using storytelling quality, content consistency, audience interaction quality, and niche expertise.',
+            label: 'Profile Strength',
+            value: `${completeness}%`,
+            valueColor: 'text-[#1F1F1F]',
           },
           {
-            label: 'Followers',
-            value: fmtNum(totalFollowers),
+            label: 'Showcase Reels',
+            value: String(reels.length),
             valueColor: 'text-[#1F1F1F]',
           },
           {
             label: 'Avg. Engagement',
             value: `${(creator.insights.averageEngagementRate * 100).toFixed(1)}%`,
-            valueColor: 'text-[#1F1F1F]',
-          },
-          {
-            label: 'Collabs Done',
-            value: String(creator.insights.collaborationCount),
-            valueColor: 'text-[#1F1F1F]',
-          },
-          {
-            label: 'Success Rate',
-            value: `${(creator.insights.successRate * 100).toFixed(0)}%`,
             valueColor: 'text-[#A8678A]',
           },
-        ].map(({ label, value, valueColor, tooltip }) => (
-          <div key={label} className="bg-white border border-[#E7E1D8] rounded-2xl p-4 flex flex-col justify-between gap-2.5 relative group min-h-[92px]">
-            <p className={`text-3xl font-black tracking-tight ${valueColor} leading-none`}>{value}</p>
-            <div className="flex items-center gap-1 mt-auto">
-              <p className="text-[10px] text-[#6E6A65] font-black uppercase tracking-wider leading-none">{label}</p>
-              {tooltip && (
-                <div className="relative inline-block">
-                  <span className="text-[10px] text-[#A8678A] cursor-help font-bold">ⓘ</span>
-                  <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-[#1F1F1F] text-white text-[10px] p-2.5 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity duration-200 shadow-lg z-20 leading-relaxed font-normal normal-case">
-                    {tooltip}
-                  </div>
-                </div>
-              )}
+        ].map(({ label, value, ariaLabel, valueColor }) => (
+          <div
+            key={label}
+            role={ariaLabel ? 'img' : undefined}
+            aria-label={ariaLabel}
+            className="bg-white border border-[#E7E1D8] rounded-2xl p-4 flex flex-col justify-between min-h-[84px] shadow-sm"
+          >
+            <div>
+              <p className={`text-2xl font-black tracking-tight ${valueColor} leading-none`}>{value}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-[#6E6A65] font-black uppercase tracking-wider leading-none mt-2">
+                {label}
+              </p>
             </div>
           </div>
         ))}
       </div>
 
-      {/* ── 2x2 COMPACT INTEL GRID ── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-
-        {/* 1. Creator Trust Score Panel */}
-        <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card flex flex-col justify-between gap-4 h-full">
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center gap-2">
-              <span className="text-lg leading-none select-none">🛡️</span>
-              <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">Creator Trust Score</h3>
-              <span className="ml-auto text-[#6E6A65] cursor-help" title="How the score is calculated">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 5.25h.008v.008H12v-.008Z" />
-                </svg>
-              </span>
-            </div>
-            <span className="text-[9px] font-bold text-[#A8678A] uppercase tracking-wider pl-7 leading-none">
-              Professional Reputation Score
-            </span>
-          </div>
-
-          <div className="flex items-center justify-between gap-4" role="img" aria-label={`Trust Score: ${creator.trustScore} out of 100`}>
-            <div className="space-y-2">
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-4xl font-black text-[#1F1F1F] tracking-tight">{creator.trustScore}</span>
-                <span className="text-[#6E6A65] font-semibold text-sm">/ 100</span>
-                <span className="ml-1.5 px-2 py-0.5 rounded-full text-[9px] font-black bg-[#F8EFF3] text-[#A8678A] uppercase tracking-wider">
-                  Excellent
-                </span>
-              </div>
-              <p className="text-[11px] text-[#6E6A65] leading-snug">
-                Based on audience quality, engagement & collaboration history.
-              </p>
-            </div>
-
-            {/* Ring chart */}
-            <div className="relative w-20 h-20 shrink-0">
-              <svg className="w-20 h-20 -rotate-90" viewBox="0 0 96 96">
-                <circle cx="48" cy="48" r="38" fill="none" stroke="#E7E1D8" strokeWidth="10" />
-                <circle cx="48" cy="48" r="38" fill="none" stroke="#A8678A" strokeWidth="10"
-                  strokeDasharray={`${(creator.trustScore / 100) * 238.76} 238.76`}
-                  strokeLinecap="round" />
-              </svg>
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-base font-black text-[#1F1F1F]">{creator.trustScore}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-[#F8EFF3] rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-wider text-[#A8678A] text-center mt-auto">
-            🏆 Top 18% in {creator.contentCategories[0] ?? 'Lifestyle'} Niche
-          </div>
-        </div>
-
-        {/* 2. Score Breakdown Panel */}
-        <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card flex flex-col justify-between gap-4 h-full">
-          <div className="flex items-center gap-2">
-            <span className="text-lg leading-none select-none">📊</span>
-            <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">Score Breakdown</h3>
-          </div>
-          {(() => {
-            const factors = creator.id === 'creator-1' || creator.trustScore === 82
-              ? [
-                  { factor: 'Audience Authenticity', impact: '+22' },
-                  { factor: 'Engagement Quality', impact: '+18' },
-                  { factor: 'Growth Consistency', impact: '+12' },
-                  { factor: 'Collaboration Success', impact: '+30' },
-                ]
-              : [
-                  { factor: 'Audience Authenticity', impact: `+${Math.round(creator.trustScore * 0.27)}` },
-                  { factor: 'Engagement Quality', impact: `+${Math.round(creator.trustScore * 0.22)}` },
-                  { factor: 'Growth Consistency', impact: `+${Math.round(creator.trustScore * 0.15)}` },
-                  { factor: 'Collaboration Success', impact: `+${creator.trustScore - Math.round(creator.trustScore * 0.27) - Math.round(creator.trustScore * 0.22) - Math.round(creator.trustScore * 0.15)}` },
-                ];
-            return (
-              <div className="space-y-2 flex-1">
-                <p className="text-[9px] font-bold uppercase tracking-wider text-[#6E6A65] leading-none">Contributing Factors</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {factors.map((item) => (
-                    <div key={item.factor} className="bg-[#F6F2E8]/40 border border-[#E7E1D8]/40 rounded-xl p-3 flex flex-col justify-between min-h-[64px] transition-all duration-200 hover:bg-white hover:border-[#A8678A]/30">
-                      <span className="text-[9px] font-bold uppercase tracking-wider text-[#6E6A65] leading-tight mb-1">{item.factor}</span>
-                      <span className="text-base font-black text-[#A8678A] leading-none">{item.impact}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })()}
-          <p className="text-[10px] text-[#6E6A65] leading-normal italic border-t border-[#E7E1D8]/60 pt-2.5">
-            "Calculated using audience quality, content consistency, engagement health, and collaboration history."
-          </p>
-        </div>
-
-        {/* 3. Audience Demographics */}
-        <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card flex flex-col justify-between gap-4 h-full">
-          <div className="flex items-center gap-2">
-            <span className="text-lg leading-none select-none">👥</span>
-            <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">Audience Demographics</h3>
-          </div>
-
-          <div className="flex items-center gap-4 flex-1">
-            <DonutChart
-              female={dem.genderSplit.female}
-              male={dem.genderSplit.male}
-              other={dem.genderSplit.other}
-            />
-
-            {/* Age legend */}
-            <div className="space-y-1.5 flex-1">
-              {[
-                { label: '18-24', color: 'bg-[#A8678A]',   pct: dem.ageGroups['18-24'] },
-                { label: '25-34', color: 'bg-[#1F1F1F]',  pct: dem.ageGroups['25-34'] },
-                { label: '35-44', color: 'bg-[#6E6A65]',  pct: dem.ageGroups['35-44'] },
-                { label: '45+',   color: 'bg-[#E7E1D8]',pct: dem.ageGroups['45+'] },
-              ].map(({ label, color, pct }) => (
-                <div key={label} className="flex items-center gap-2">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${color}`} />
-                  <span className="text-xs text-[#6E6A65] w-10 leading-none">{label}</span>
-                  <span className="text-xs font-black text-[#1F1F1F] leading-none">
-                    {typeof pct === 'number' ? `${(pct * 100).toFixed(0)}%` : '—'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Top countries */}
-          <div className="mt-auto">
-            <p className="text-[9px] font-black uppercase tracking-widest text-[#6E6A65] mb-1.5 leading-none">Top Countries</p>
-            <div className="flex items-center gap-1.5">
-              {dem.topCountries.slice(0, 3).map(c => (
-                <span key={c} className="px-2.5 py-1 rounded-lg bg-[#F8EFF3] text-[#A8678A] border border-[#E7E1D8] text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
-                  {c}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* 4. AI Creator DNA Card (2x2 Grid placement, Compact Summary) */}
-        <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card relative overflow-hidden flex flex-col justify-between gap-4 h-full">
-          <div className="absolute top-0 right-0 w-28 h-24 bg-gradient-to-br from-[#A8678A]/10 to-transparent rounded-bl-full pointer-events-none" />
-          
-          <div className="flex items-center justify-between gap-2 z-10 w-full">
-            <div className="flex items-center gap-2">
-              <span className="text-lg leading-none select-none">🧬</span>
-              <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">AI Creator DNA</h3>
-            </div>
-            <span className="px-2.5 py-1 rounded-full text-[9px] font-black bg-[#F8EFF3] text-[#A8678A] border border-[#A8678A]/30 flex items-center gap-1 shadow-sm shrink-0 uppercase tracking-wider">
-              ✨ AI Generated
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2 z-10 flex-1">
-            {[
-              { label: 'Content Style', value: 'Educational Storytelling' },
-              { label: 'Audience Trust', value: 'High', valueClass: 'text-emerald-600 font-bold' },
-              { label: 'Brand Safety', value: '95%', valueClass: 'text-[#A8678A] font-bold' },
-              { label: 'Top Niches', value: 'Beauty • Lifestyle • Wellness' },
-            ].map((f) => (
-              <div key={f.label} className="bg-[#F6F2E8]/40 border border-[#E7E1D8]/50 rounded-xl p-3 flex flex-col justify-center h-full transition-all duration-200 hover:bg-white hover:border-[#A8678A]/35 hover:shadow-soft">
-                <span className="block text-[8px] font-black uppercase tracking-widest text-[#6E6A65] mb-1 leading-none">{f.label}</span>
-                <span className={`block text-xs font-bold text-[#1F1F1F] leading-tight break-words ${f.valueClass ?? ''}`}>{f.value}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-
-      {/* ── REELS TAB ──────────────────────────────────────────────────── */}
-      <div>
-        {/* Tab bar */}
-        <div className="flex gap-1 bg-white border border-[#E7E1D8] rounded-2xl p-1.5 w-fit mb-5">
-          {(['reels', 'about', 'reviews', 'applied'] as const).map((tab) => (
-            <button key={tab} onClick={() => setActiveTab(tab)}
-              className={`px-5 py-2 rounded-xl text-xs font-bold capitalize transition-all ${
-                activeTab === tab
-                  ? 'bg-[#1F1F1F] text-white'
+      {/* ── TAB NAVIGATION & CONTENT ────────────────────────────────────── */}
+      <div className="space-y-4 pt-1">
+        {/* Modern Tab Bar */}
+        <div className="flex gap-1.5 bg-white border border-[#E7E1D8] rounded-2xl p-1.5 w-fit shadow-sm overflow-x-auto max-w-full">
+          {[
+            { id: 'reels', label: '🎬 Showcase & Reels' },
+            { id: 'about', label: '🧬 Creator DNA & Style' },
+            { id: 'trust', label: '📊 Trust & Analytics' },
+            { id: 'reviews', label: '⭐ Reviews' },
+            ...(isOwnProfile ? [{ id: 'applied', label: '📋 Applications' }] : []),
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id as any)}
+              className={`px-4 py-2 rounded-xl text-xs font-bold transition-all shrink-0 ${
+                activeTab === tab.id
+                  ? 'bg-[#1F1F1F] text-white shadow-soft'
                   : 'text-[#6E6A65] hover:text-[#1F1F1F] hover:bg-[#F8EFF3]'
-              }`}>
-              {tab === 'reels' ? '🎬 Reels' : tab === 'about' ? '👤 About' : tab === 'reviews' ? '⭐ Reviews' : '📋 Applied'}
+              }`}
+            >
+              {tab.label}
             </button>
           ))}
         </div>
@@ -1413,21 +1472,293 @@ export default function CreatorProfilePage() {
           </div>
         )}
 
-        {/* About tab */}
+        {/* ── ABOUT & CREATOR DNA TAB ── */}
         {activeTab === 'about' && (
-          <div className="bg-white border border-[#E7E1D8] rounded-[20px] p-6 shadow-card space-y-4">
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-wider text-[#6E6A65] mb-2">Bio</p>
-              <p className="text-sm text-[#6E6A65] leading-relaxed">{creator.bio}</p>
+          <div className="space-y-4">
+            <div className="bg-white border border-[#E7E1D8] rounded-[20px] p-6 shadow-card space-y-5">
+              <div className="flex items-center justify-between border-b border-[#E7E1D8] pb-3">
+                <div>
+                  <h3 className="text-base font-black text-[#1F1F1F]">Creator DNA & Collaboration Preferences</h3>
+                  <p className="text-xs text-[#6E6A65]">Personalized strategy directly from {creator.displayName}.</p>
+                </div>
+                {isOwnProfile && (
+                  <button
+                    onClick={() => setShowOnboardingModal(true)}
+                    className="px-3.5 py-1.5 bg-[#1F1F1F] text-white text-xs font-bold rounded-xl hover:opacity-90 transition-opacity"
+                  >
+                    Edit DNA
+                  </button>
+                )}
+              </div>
+
+              {/* Grid of preferences */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                {/* Platforms */}
+                <div className="bg-[#FAF7F2] p-4 rounded-xl border border-[#E7E1D8]/70">
+                  <span className="font-bold text-[#6E6A65] uppercase tracking-wider text-[10px] block mb-2">
+                    Active Platforms
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {creator.platforms && creator.platforms.length > 0 ? (
+                      creator.platforms.map((p) => (
+                        <span key={p} className="px-2.5 py-1 rounded-lg bg-white font-bold text-[#1F1F1F] border border-[#E7E1D8] shadow-sm">
+                          {p}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-[#9E9A97] italic">Not specified yet</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Content Style */}
+                <div className="bg-[#FAF7F2] p-4 rounded-xl border border-[#E7E1D8]/70">
+                  <span className="font-bold text-[#6E6A65] uppercase tracking-wider text-[10px] block mb-2">
+                    Content Style & Tone
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {creator.contentStyle && creator.contentStyle.length > 0 ? (
+                      creator.contentStyle.map((s) => (
+                        <span key={s} className="px-2.5 py-1 rounded-lg bg-[#F8EFF3] text-[#A8678A] font-bold border border-[#A8678A]/20 shadow-sm">
+                          {s}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-[#9E9A97] italic">Not specified yet</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Target Audience */}
+                <div className="bg-[#FAF7F2] p-4 rounded-xl border border-[#E7E1D8]/70">
+                  <span className="font-bold text-[#6E6A65] uppercase tracking-wider text-[10px] block mb-2">
+                    Target Audience
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {creator.targetAudience && creator.targetAudience.length > 0 ? (
+                      creator.targetAudience.map((a) => (
+                        <span key={a} className="px-2.5 py-1 rounded-lg bg-white font-bold text-[#1F1F1F] border border-[#E7E1D8] shadow-sm">
+                          {a}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-[#9E9A97] italic">Not specified yet</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Collaboration Interests */}
+                <div className="bg-[#FAF7F2] p-4 rounded-xl border border-[#E7E1D8]/70">
+                  <span className="font-bold text-[#6E6A65] uppercase tracking-wider text-[10px] block mb-2">
+                    Preferred Brand Collaborations
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    {creator.collabTypes && creator.collabTypes.length > 0 ? (
+                      creator.collabTypes.map((c) => (
+                        <span key={c} className="px-2.5 py-1 rounded-lg bg-[#F8EFF3] text-[#1F1F1F] font-bold border border-[#E7E1D8] shadow-sm">
+                          {c}
+                        </span>
+                      ))
+                    ) : (
+                      <span className="text-[#9E9A97] italic">Not specified yet</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Unique Value Proposition */}
+              {creator.uniqueValue && (
+                <div className="bg-[#FAF7F2] p-4 rounded-xl border border-[#E7E1D8]/70">
+                  <span className="font-bold text-[#6E6A65] uppercase tracking-wider text-[10px] block mb-1.5">
+                    What Makes My Content Special
+                  </span>
+                  <p className="text-xs text-[#1F1F1F] italic leading-relaxed">
+                    "{creator.uniqueValue}"
+                  </p>
+                </div>
+              )}
+
+              {/* Bio */}
+              <div className="pt-2">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-[#6E6A65] mb-2">About & Bio</p>
+                <p className="text-xs text-[#1F1F1F] leading-relaxed bg-[#FAF7F2] p-4 rounded-xl border border-[#E7E1D8]/70">
+                  {creator.bio || 'No bio provided yet.'}
+                </p>
+              </div>
+
+              {/* Social Accounts */}
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wider text-[#6E6A65] mb-2">Connected Accounts</p>
+                {creator.socialAccounts.length > 0 ? (
+                  <div className="flex flex-wrap gap-3">
+                    {creator.socialAccounts.map((acc, i) => (
+                      <div key={i} className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold ${acc.connected ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A]' : 'bg-white border-[#E7E1D8] text-[#6E6A65]'}`}>
+                        {PLATFORM_SVG[acc.platform]}
+                        <span className="capitalize">{acc.platform}</span>
+                        <span className="font-black">{fmtNum(acc.followerCount)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-[#9E9A97] italic">No social accounts connected yet.</p>
+                )}
+              </div>
             </div>
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-wider text-[#6E6A65] mb-2">Connected Platforms</p>
-              <div className="flex flex-wrap gap-3">
-                {creator.socialAccounts.map((acc, i) => (
-                  <div key={i} className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-semibold ${acc.connected ? 'bg-[#F8EFF3] border-[#A8678A] text-[#A8678A]' : 'bg-white border-[#E7E1D8] text-[#6E6A65]'}`}>
-                    {PLATFORM_SVG[acc.platform]}
-                    <span className="capitalize">{acc.platform}</span>
-                    <span className="font-black">{fmtNum(acc.followerCount)}</span>
+          </div>
+        )}
+
+        {/* ── TRUST & ANALYTICS TAB ── */}
+        {activeTab === 'trust' && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* 1. Creator Trust Score Panel */}
+            <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card flex flex-col justify-between gap-4 h-full">
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg leading-none select-none">🛡️</span>
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">Creator Trust Score</h3>
+                </div>
+                <span className="text-[9px] font-bold text-[#A8678A] uppercase tracking-wider pl-7 leading-none">
+                  Professional Reputation Score
+                </span>
+              </div>
+
+              <div className="flex items-center justify-between gap-4" role="img" aria-label={`Trust Score: ${creator.trustScore} out of 100`}>
+                <div className="space-y-2">
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-4xl font-black text-[#1F1F1F] tracking-tight">{creator.trustScore}</span>
+                    <span className="text-[#6E6A65] font-semibold text-sm">/ 100</span>
+                    <span className="ml-1.5 px-2 py-0.5 rounded-full text-[9px] font-black bg-[#F8EFF3] text-[#A8678A] uppercase tracking-wider">
+                      {creator.trustScore >= 70 ? 'Excellent' : 'Calculating'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#6E6A65] leading-snug">
+                    Based on audience quality, engagement & collaboration history.
+                  </p>
+                </div>
+
+                <div className="relative w-20 h-20 shrink-0">
+                  <svg className="w-20 h-20 -rotate-90" viewBox="0 0 96 96">
+                    <circle cx="48" cy="48" r="38" fill="none" stroke="#E7E1D8" strokeWidth="10" />
+                    <circle cx="48" cy="48" r="38" fill="none" stroke="#A8678A" strokeWidth="10"
+                      strokeDasharray={`${(creator.trustScore / 100) * 238.76} 238.76`}
+                      strokeLinecap="round" />
+                  </svg>
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="text-base font-black text-[#1F1F1F]">{creator.trustScore}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-[#F8EFF3] rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-wider text-[#A8678A] text-center mt-auto">
+                🏆 Top Niche Ranking in {creator.contentCategories[0] ?? 'Lifestyle'}
+              </div>
+            </div>
+
+            {/* 2. Score Breakdown Panel */}
+            <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card flex flex-col justify-between gap-4 h-full">
+              <div className="flex items-center gap-2">
+                <span className="text-lg leading-none select-none">📊</span>
+                <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">Score Breakdown</h3>
+              </div>
+              {(() => {
+                const factors = creator.trustScore > 0
+                  ? [
+                      { factor: 'Audience Authenticity', impact: `+${Math.round(creator.trustScore * 0.27)}` },
+                      { factor: 'Engagement Quality', impact: `+${Math.round(creator.trustScore * 0.22)}` },
+                      { factor: 'Growth Consistency', impact: `+${Math.round(creator.trustScore * 0.15)}` },
+                      { factor: 'Collaboration Success', impact: `+${creator.trustScore - Math.round(creator.trustScore * 0.27) - Math.round(creator.trustScore * 0.22) - Math.round(creator.trustScore * 0.15)}` },
+                    ]
+                  : [
+                      { factor: 'Audience Authenticity', impact: 'Pending' },
+                      { factor: 'Engagement Quality', impact: 'Pending' },
+                      { factor: 'Growth Consistency', impact: 'Pending' },
+                      { factor: 'Collaboration Success', impact: 'Pending' },
+                    ];
+                return (
+                  <div className="space-y-2 flex-1">
+                    <p className="text-[9px] font-bold uppercase tracking-wider text-[#6E6A65] leading-none">Contributing Factors</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {factors.map((item) => (
+                        <div key={item.factor} className="bg-[#F6F2E8]/40 border border-[#E7E1D8]/40 rounded-xl p-3 flex flex-col justify-between min-h-[64px]">
+                          <span className="text-[9px] font-bold uppercase tracking-wider text-[#6E6A65] leading-tight mb-1">{item.factor}</span>
+                          <span className="text-sm font-black text-[#A8678A] leading-none">{item.impact}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+              <p className="text-[10px] text-[#6E6A65] leading-normal italic border-t border-[#E7E1D8]/60 pt-2.5">
+                "Calculated using audience authenticity, content quality, and collaboration history."
+              </p>
+            </div>
+
+            {/* 3. Audience Demographics */}
+            <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card flex flex-col justify-between gap-4 h-full">
+              <div className="flex items-center gap-2">
+                <span className="text-lg leading-none select-none">👥</span>
+                <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">Audience Demographics</h3>
+              </div>
+
+              <div className="flex items-center gap-4 flex-1">
+                <DonutChart
+                  female={dem.genderSplit.female}
+                  male={dem.genderSplit.male}
+                  other={dem.genderSplit.other}
+                />
+
+                <div className="space-y-1.5 flex-1">
+                  {[
+                    { label: '18-24', color: 'bg-[#A8678A]', pct: dem.ageGroups['18-24'] },
+                    { label: '25-34', color: 'bg-[#1F1F1F]', pct: dem.ageGroups['25-34'] },
+                    { label: '35-44', color: 'bg-[#6E6A65]', pct: dem.ageGroups['35-44'] },
+                    { label: '45+', color: 'bg-[#E7E1D8]', pct: dem.ageGroups['45+'] },
+                  ].map(({ label, color, pct }) => (
+                    <div key={label} className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full shrink-0 ${color}`} />
+                      <span className="text-xs text-[#6E6A65] w-10 leading-none">{label}</span>
+                      <span className="text-xs font-black text-[#1F1F1F] leading-none">
+                        {typeof pct === 'number' ? `${(pct * 100).toFixed(0)}%` : '—'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-auto">
+                <p className="text-[9px] font-black uppercase tracking-widest text-[#6E6A65] mb-1.5 leading-none">Top Regions</p>
+                <div className="flex items-center gap-1.5">
+                  {(dem.topCountries.length > 0 ? dem.topCountries.slice(0, 3) : ['Global', 'IN', 'US']).map((c) => (
+                    <span key={c} className="px-2.5 py-1 rounded-lg bg-[#F8EFF3] text-[#A8678A] border border-[#E7E1D8] text-[10px] font-bold uppercase tracking-wider leading-none shadow-sm">
+                      {c}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* 4. AI Creator DNA Summary */}
+            <div className="bg-white border border-[#E7E1D8] rounded-2xl p-5 shadow-card relative overflow-hidden flex flex-col justify-between gap-4 h-full">
+              <div className="flex items-center justify-between gap-2 z-10 w-full">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg leading-none select-none">🧬</span>
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#1F1F1F] leading-none">AI Profile Assessment</h3>
+                </div>
+                <span className="px-2.5 py-1 rounded-full text-[9px] font-black bg-[#F8EFF3] text-[#A8678A] border border-[#A8678A]/30 flex items-center gap-1 shadow-sm shrink-0 uppercase tracking-wider">
+                  ✨ Realtime AI
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 z-10 flex-1">
+                {[
+                  { label: 'Content Focus', value: creator.contentCategories[0] ? creator.contentCategories[0].toUpperCase() : 'Lifestyle' },
+                  { label: 'Brand Safety', value: 'Verified 100%', valueClass: 'text-emerald-600 font-bold' },
+                  { label: 'Audience Trust', value: creator.trustScore > 0 ? 'High' : 'Establishing', valueClass: 'text-[#A8678A] font-bold' },
+                  { label: 'Collaboration Match', value: 'Ready', valueClass: 'text-[#1F1F1F] font-bold' },
+                ].map((f) => (
+                  <div key={f.label} className="bg-[#F6F2E8]/40 border border-[#E7E1D8]/50 rounded-xl p-3 flex flex-col justify-center h-full">
+                    <span className="block text-[8px] font-black uppercase tracking-widest text-[#6E6A65] mb-1 leading-none">{f.label}</span>
+                    <span className={`block text-xs font-bold text-[#1F1F1F] leading-tight ${f.valueClass ?? ''}`}>{f.value}</span>
                   </div>
                 ))}
               </div>
@@ -1513,6 +1844,30 @@ export default function CreatorProfilePage() {
         <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
           <div className="w-12 h-12 border-4 border-[#A8678A] border-t-transparent rounded-full animate-spin mb-4" />
           <p className="text-white font-bold text-sm">Uploading and saving your reel...</p>
+        </div>
+      )}
+
+      {/* ── ONBOARDING / EDIT PROFILE MODAL ────────────────────────────── */}
+      {showOnboardingModal && (
+        <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-2xl bg-white border border-[#E7E1D8] rounded-[24px] shadow-2xl p-6 sm:p-8 my-8 max-h-[90vh] overflow-y-auto">
+            <button
+              onClick={() => setShowOnboardingModal(false)}
+              className="absolute top-4 right-4 text-[#6E6A65] hover:text-[#1F1F1F] text-sm font-black w-8 h-8 rounded-full bg-[#F8EFF3] flex items-center justify-center transition-colors z-10"
+              title="Close"
+            >
+              ✕
+            </button>
+            <CreatorOnboardingPage
+              isModal={true}
+              onComplete={async () => {
+                setShowOnboardingModal(false);
+                if (profileId) {
+                  await loadCreator(profileId);
+                }
+              }}
+            />
+          </div>
         </div>
       )}
 
