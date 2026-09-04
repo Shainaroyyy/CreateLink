@@ -6,7 +6,7 @@ import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 interface AuthStore {
   currentUser: User | null;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<User>;
+  login: (email: string, password: string, expectedRole?: 'creator' | 'brand') => Promise<User>;
   logout: () => void;
   register: (email: string, password: string, role: 'creator' | 'brand', profile?: any) => Promise<User>;
   verifyEmail: (token: string, email?: string) => Promise<void>;
@@ -15,14 +15,22 @@ interface AuthStore {
   hydrateFromSupabaseSession: () => Promise<void>;
 }
 
+let roleLoginInProgress = false;
+
 export const useAuthStore = create<AuthStore>((set) => ({
   currentUser: null,
   isAuthenticated: false,
 
-  login: async (email, password) => {
-    const user = await authService.login(email, password);
-    set({ currentUser: user, isAuthenticated: true });
-    return user;
+  login: async (email, password, expectedRole) => {
+    roleLoginInProgress = true;
+    set({ currentUser: null, isAuthenticated: false });
+    try {
+      const user = await authService.login(email, password, expectedRole);
+      set({ currentUser: user, isAuthenticated: true });
+      return user;
+    } finally {
+      roleLoginInProgress = false;
+    }
   },
 
   logout: async () => {
@@ -80,6 +88,8 @@ export const useAuthStore = create<AuthStore>((set) => ({
 
 if (isSupabaseConfigured) {
   supabase.auth.onAuthStateChange((_event, session) => {
+    if (roleLoginInProgress) return;
+
     const user = session?.user ?? null;
     if (!user) {
       useAuthStore.setState({ currentUser: null, isAuthenticated: false });

@@ -26,20 +26,22 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      const loginPromise = login(email.trim().toLowerCase(), password);
+      const queryRole = new URLSearchParams(location.search).get('role');
+      const savedRole = sessionStorage.getItem('createlink-login-role');
+      const forcedRole = queryRole || savedRole;
+      const expectedRole = forcedRole === 'creator' || forcedRole === 'brand' ? forcedRole : undefined;
+      const loginPromise = login(email.trim().toLowerCase(), password, expectedRole);
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Login timed out. Please check your credentials or network.')), 10000)
       );
       const user = (await Promise.race([loginPromise, timeoutPromise])) as any;
-
-      // if role was forced via query or user role dictates, redirect appropriately
-      const params = new URLSearchParams(location.search);
-      const forcedRole = params.get('role');
-      if (forcedRole === 'brand' || user.role === 'brand') {
+      // The authenticated account role controls the destination, not the login page URL.
+      if (user.role === 'brand') {
         navigate('/brand/dashboard');
       } else {
         navigate('/feed');
       }
+      sessionStorage.removeItem('createlink-login-role');
     } catch (err: any) {
       setError(err.message || 'Login failed');
     } finally {

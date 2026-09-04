@@ -1,5 +1,6 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 import { getStore } from './store';
+import { createPersistentNotification } from './notificationService';
 
 export interface DbConversation {
   id: string;
@@ -347,6 +348,26 @@ export async function sendMessage(
     .single();
 
   if (error) throw error;
+
+  const { data: conversation } = await supabase
+    .from('conversations')
+    .select('creator_id, brand_id')
+    .eq('id', conversationId)
+    .maybeSingle();
+
+  const recipientId = conversation
+    ? conversation.creator_id === senderId ? conversation.brand_id : conversation.creator_id
+    : null;
+  if (recipientId) {
+    await createPersistentNotification(
+      recipientId,
+      'message_received',
+      'New message',
+      'You have received a new message.'
+    ).catch((notificationError) => {
+      console.warn('Message sent, but recipient notification could not be created:', notificationError);
+    });
+  }
 
   // Touch updated_at on conversation
   try {

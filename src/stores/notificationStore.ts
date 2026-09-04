@@ -8,6 +8,7 @@ interface NotificationStore {
   loadNotifications: (userId: string) => Promise<void>;
   markRead: (id: string) => void;
   markAllRead: (userId: string) => void;
+  receiveNotification: (notification: Notification) => void;
 }
 
 export const useNotificationStore = create<NotificationStore>((set) => ({
@@ -36,5 +37,15 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
       notifications: state.notifications.map((n) => ({ ...n, read: true })),
       unreadCount: 0,
     }));
+  },
+
+  receiveNotification: (notification) => {
+    set((state) => {
+      if (state.notifications.some((item) => item.id === notification.id)) return state;
+      return {
+        notifications: [notification, ...state.notifications],
+        unreadCount: state.unreadCount + (notification.read ? 0 : 1),
+      };
+    });
   },
 }));

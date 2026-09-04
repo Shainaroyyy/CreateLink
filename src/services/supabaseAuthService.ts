@@ -49,7 +49,7 @@ function toUserFromProfile(profile: any, authUser?: any): User {
     email,
     displayName,
     passwordHash: "supabase-auth",
-    role: (profile?.role as UserRole) ?? "creator",
+    role: (profile?.role as UserRole) || (meta.role as UserRole) || "creator",
     verificationStatus: (profile?.verification_status as any) ?? "unverified",
     emailVerified: Boolean(profile?.email_verified ?? authUser?.email_confirmed_at),
     createdAt: profile?.created_at ?? authUser?.created_at ?? new Date().toISOString(),
@@ -152,7 +152,11 @@ export async function register(
   return toUserFromProfile(profileRow, authUser);
 }
 
-export async function login(email: string, password: string): Promise<User> {
+export async function login(
+  email: string,
+  password: string,
+  expectedRole?: UserRole
+): Promise<User> {
   if (!isSupabaseConfigured) {
     throw new Error("Supabase is not configured. Add your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY values.");
   }
@@ -213,6 +217,13 @@ export async function login(email: string, password: string): Promise<User> {
   }
 
   const mappedUser = toUserFromProfile(profile, authUser);
+
+  if (expectedRole && mappedUser.role !== expectedRole) {
+    await supabase.auth.signOut();
+    const roleLabel = expectedRole === 'creator' ? 'Creator' : 'Brand';
+    throw new Error(`${roleLabel} account not found for this email or credentials.`);
+  }
+
   return mappedUser;
 }
 
@@ -291,6 +302,7 @@ export async function getCurrentUser(): Promise<User | null> {
         supabase.from('creator_profiles').update({ name: metaName }).eq('id', user.id).then();
       } catch {}
     }
+
   }
 
   return toUserFromProfile(profile, user);

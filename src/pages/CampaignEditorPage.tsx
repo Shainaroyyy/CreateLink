@@ -104,6 +104,16 @@ export default function CampaignEditorPage() {
     return Math.min(100, score);
   };
 
+  const getQualityBarClass = () => {
+    const score = getCampaignQualityScore();
+    if (score >= 95) return 'campaign-quality-bar campaign-quality-bar--95';
+    if (score >= 85) return 'campaign-quality-bar campaign-quality-bar--85';
+    if (score >= 75) return 'campaign-quality-bar campaign-quality-bar--75';
+    if (score >= 65) return 'campaign-quality-bar campaign-quality-bar--65';
+    if (score >= 50) return 'campaign-quality-bar campaign-quality-bar--50';
+    return 'campaign-quality-bar campaign-quality-bar--low';
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!brand) return;
@@ -444,10 +454,7 @@ export default function CampaignEditorPage() {
               <span className="text-sm font-black text-[#A8678A]">{getCampaignQualityScore()}/100</span>
             </div>
             <div className="w-full bg-[#E7E1D8]/50 h-2 rounded-full overflow-hidden">
-              <div 
-                className="bg-[#A8678A] h-full transition-all duration-500" 
-                style={{ width: `${getCampaignQualityScore()}%` }}
-              />
+              <div className={getQualityBarClass()} />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
               <div className="flex items-center gap-1.5 text-[11px] font-semibold">

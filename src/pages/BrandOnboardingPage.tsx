@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useBrandStore } from '../stores/brandStore';
 import { getStore } from '../services/store';
+import { isSupabaseConfigured, supabase } from '../lib/supabaseClient';
 import type { Brand } from '../types/index';
 
 export default function BrandOnboardingPage() {
@@ -54,6 +55,19 @@ export default function BrandOnboardingPage() {
     // Save brand to memory store
     const store = getStore();
     store.brands.set(currentUser.id, brand);
+
+    if (isSupabaseConfigured) {
+      const { error } = await supabase
+        .from('profiles')
+        .update({
+          company_name: brand.companyName,
+          industry: brand.industry,
+          bio: brand.description,
+          verification_status: brand.verificationStatus,
+        })
+        .eq('id', currentUser.id);
+      if (error) console.warn('Failed to save brand profile details:', error.message);
+    }
 
     // If verification document was uploaded, set user status too
     if (docName) {

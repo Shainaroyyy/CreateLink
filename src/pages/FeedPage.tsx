@@ -7,12 +7,14 @@ import { useFeedStore } from '../stores/feedStore';
 import { useAuthStore } from '../stores/authStore';
 import { useCreatorStore } from '../stores/creatorStore';
 import { useBrandStore } from '../stores/brandStore';
+import { getBrandsByIds } from '../services/brandService';
 import { getStore } from '../services/store';
 import FeedCard from '../components/feed/FeedCard';
 import ApplicationForm from '../components/application/ApplicationForm';
 import CreatorApplicationForm from '../components/application/CreatorApplicationForm';
 import type { FeedPost, Campaign } from '../types/index';
 import { uploadReelFile, saveReel } from '../services/reelsService';
+import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 
 // ── NEW: Creator post types ───────────────────────────────────────────────────
 type CreatorPostKind = 'hiring' | 'share_work';
@@ -428,8 +430,33 @@ export default function FeedPage() {
   const [applyingPost, setApplyingPost] = useState<FeedPost | null>(null);
   const [successMessage, setSuccessMessage] = useState('');
   const [isUploading, setIsUploading] = useState(false);
+  const [, setBrandRefresh] = useState(0);
 
   useEffect(() => { loadFeed(); }, [loadFeed]);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    const channel = supabase
+      .channel('feed-campaigns')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'campaigns' }, () => {
+        void loadFeed();
+      })
+      .subscribe();
+
+    return () => { void supabase.removeChannel(channel); };
+  }, [loadFeed]);
+
+  useEffect(() => {
+    const campaignBrandIds = rawPosts
+      .filter((post) => post.type === 'campaign')
+      .map((post) => post.authorId);
+    if (!campaignBrandIds.length) return;
+
+    getBrandsByIds(campaignBrandIds)
+      .then(() => setBrandRefresh((value) => value + 1))
+      .catch((error) => console.warn('Failed to load campaign brand profiles:', error));
+  }, [rawPosts]);
 
   useEffect(() => {
     if (currentUser) {

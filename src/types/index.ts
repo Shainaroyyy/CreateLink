@@ -206,7 +206,8 @@ export type NotificationType =
   | 'brand_score_change'
   | 'verification_update'
   | 'post_removed'
-  | 'account_locked';
+  | 'account_locked'
+  | 'message_received';
 
 export interface Notification {
   id: string;

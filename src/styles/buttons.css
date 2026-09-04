@@ -60,3 +60,16 @@
         left: 100%;
     }
 }
+
+.campaign-quality-bar {
+    height: 100%;
+    background: #A8678A;
+    transition: width 0.5s ease;
+}
+
+.campaign-quality-bar--low { width: 20%; }
+.campaign-quality-bar--50 { width: 50%; }
+.campaign-quality-bar--65 { width: 65%; }
+.campaign-quality-bar--75 { width: 75%; }
+.campaign-quality-bar--85 { width: 85%; }
+.campaign-quality-bar--95 { width: 95%; }

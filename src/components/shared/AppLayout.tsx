@@ -7,6 +7,8 @@ import { getStore } from '../../services/store';
 import { fetchApplications } from '../../services/applicationService';
 import { searchCreators, initCreatorPresence } from '../../services/creatorService';
 import { getOrCreateConversation } from '../../services/messagingService';
+import { supabase, isSupabaseConfigured } from '../../lib/supabaseClient';
+import type { Notification } from '../../types/index';
 import type { Creator } from '../../types/index';
 
 // sidebar widths
@@ -15,7 +17,7 @@ const COLLAPSED_W = 72;  // px — icon-only
 
 export function AppLayout() {
   const { currentUser, logout } = useAuthStore();
-  const { unreadCount, loadNotifications } = useNotificationStore();
+  const { unreadCount, loadNotifications, receiveNotification } = useNotificationStore();
   const navigate = useNavigate();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -83,6 +85,65 @@ export function AppLayout() {
     if (currentUser) {
       const cleanupPresence = initCreatorPresence(currentUser);
       loadNotifications(currentUser.id);
+
+      const notificationChannel = isSupabaseConfigured
+        ? supabase
+            .channel(`notifications:${currentUser.id}`)
+            .on('postgres_changes', {
+              event: 'INSERT',
+              schema: 'public',
+              table: 'notifications',
+              filter: `user_id=eq.${currentUser.id}`,
+            }, (payload) => {
+              const row = payload.new as any;
+              const notification: Notification = {
+                id: row.id,
+                userId: row.user_id,
+                type: row.type,
+                title: row.title,
+                body: row.body,
+                read: Boolean(row.read),
+                createdAt: row.created_at,
+              };
+              receiveNotification(notification);
+            })
+            .subscribe()
+        : null;
+
+      const messageNotificationChannel = isSupabaseConfigured
+        ? supabase
+            .channel(`message-notifications:${currentUser.id}`)
+            .on('postgres_changes', {
+              event: 'INSERT',
+              schema: 'public',
+              table: 'messages',
+            }, async (payload) => {
+              const row = payload.new as any;
+              if (!row || row.sender_id === currentUser.id) return;
+
+              const { data: conversation } = await supabase
+                .from('conversations')
+                .select('creator_id, brand_id')
+                .eq('id', row.conversation_id)
+                .maybeSingle();
+              if (!conversation) return;
+
+              const isRecipient =
+                conversation.creator_id === currentUser.id || conversation.brand_id === currentUser.id;
+              if (!isRecipient) return;
+
+              receiveNotification({
+                id: `message-${row.id}`,
+                userId: currentUser.id,
+                type: 'message_received',
+                title: 'New message',
+                body: 'You have received a new message.',
+                read: false,
+                createdAt: row.created_at || new Date().toISOString(),
+              });
+            })
+            .subscribe()
+        : null;
       
       const store = getStore();
       
@@ -104,9 +165,11 @@ export function AppLayout() {
 
       return () => {
         if (cleanupPresence) cleanupPresence();
+        if (notificationChannel) void supabase.removeChannel(notificationChannel);
+        if (messageNotificationChannel) void supabase.removeChannel(messageNotificationChannel);
       };
     }
-  }, [currentUser, loadNotifications]);
+  }, [currentUser, loadNotifications, receiveNotification]);
 
   const handleLogout = () => { logout(); navigate('/login'); };
 

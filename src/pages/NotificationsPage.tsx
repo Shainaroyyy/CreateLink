@@ -13,6 +13,7 @@ const TYPE_CONFIG: Record<NotificationType, { icon: string; bg: string; label: s
   verification_update:    { icon: '🛡️', bg: 'bg-[#F8EFF3]',  label: 'Verification' },
   post_removed:           { icon: '🗑️', bg: 'bg-slate-100',  label: 'Post Removed' },
   account_locked:         { icon: '🔒', bg: 'bg-red-100',     label: 'Security' },
+  message_received:       { icon: '💬', bg: 'bg-[#F8EFF3]',  label: 'Message' },
 };
 
 function relTime(iso: string) {

@@ -6,6 +6,8 @@ import { getStore } from '../services/store';
 import { useAuthStore } from '../stores/authStore';
 import type { Campaign, CompensationType, ContentCategory } from '../types/index';
 import { fetchCampaigns } from '../services/campaignsService';
+import { getBrandsByIds } from '../services/brandService';
+import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
 
 const COMP_TYPES: { value: CompensationType | 'all'; label: string }[] = [
   { value: 'all',          label: 'All' },
@@ -38,22 +40,41 @@ export default function CampaignsPage() {
   const [catFilter, setCatFilter]   = useState<ContentCategory | 'all'>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'completed'>('active');
   const [campaignsList, setCampaignsList] = useState<Campaign[]>([]);
+  const [brandsById, setBrandsById] = useState(store.brands);
 
   useEffect(() => {
-    // Initial load from in-memory cache/seed
-    setCampaignsList(Array.from(store.campaigns.values()));
+    // Use seeded data only when Supabase is unavailable; configured deployments start live.
+    if (!isSupabaseConfigured) {
+      setCampaignsList(Array.from(store.campaigns.values()));
+    }
 
     // Dynamic load from campaignsService (backend/cache)
     fetchCampaigns().then((fetched) => {
       for (const c of fetched) {
         store.campaigns.set(c.id, c);
       }
-      setCampaignsList(Array.from(store.campaigns.values()));
-    }).catch(err => console.warn('Failed to load campaigns:', err));
+      setCampaignsList(fetched);
+      return getBrandsByIds(fetched.map((campaign) => campaign.brandId));
+    }).then(() => setBrandsById(new Map(store.brands)))
+      .catch(err => console.warn('Failed to load campaigns:', err));
+
+    if (isSupabaseConfigured) {
+      const channel = supabase
+        .channel('campaigns-page')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'campaigns' }, async () => {
+          const refreshed = await fetchCampaigns();
+          for (const campaign of refreshed) store.campaigns.set(campaign.id, campaign);
+          await getBrandsByIds(refreshed.map((campaign) => campaign.brandId));
+          setCampaignsList(refreshed);
+          setBrandsById(new Map(store.brands));
+        })
+        .subscribe();
+      return () => { void supabase.removeChannel(channel); };
+    }
   }, []);
 
   const allCampaigns = campaignsList;
-  const allBrands    = store.brands;
+  const allBrands    = brandsById;
 
   const filtered = allCampaigns.filter(c => {
     if (c.status === 'removed') return false;

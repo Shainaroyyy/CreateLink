@@ -9,7 +9,7 @@ const LS_CAMPAIGNS_KEY = 'createlink-campaigns';
 export function mapRowToCampaign(row: any): Campaign {
   return {
     id: row.id,
-    brandId: row.brand_id || 'brand-1',
+    brandId: row.brand_id || '',
     title: row.title,
     description: row.description || '',
     requirements: row.requirements || `Min Trust Score: ${row.preferred_trust_score || 0}+ | Min Content Quality Score: ${row.preferred_content_quality || 0}+`,
@@ -69,7 +69,7 @@ function getFallbackCampaigns(): Campaign[] {
 
 /**
  * Fetch all campaigns.
- * Queries Supabase, falls back to localStorage/JSON seed on failure or if unconfigured.
+ * Queries Supabase when configured, using local seed data only for tests/offline mode.
  */
 export async function fetchCampaigns(): Promise<Campaign[]> {
   if (isSupabaseConfigured) {
@@ -80,12 +80,12 @@ export async function fetchCampaigns(): Promise<Campaign[]> {
         .order('created_at', { ascending: false });
 
       if (error) {
-        console.warn('Supabase campaigns fetch failed, using fallback:', error.message);
+        throw new Error(`Unable to load campaigns from Supabase: ${error.message}`);
       } else if (data) {
         return data.map(mapRowToCampaign);
       }
     } catch (e) {
-      console.warn('Failed to fetch campaigns from Supabase:', e);
+      throw e instanceof Error ? e : new Error('Unable to load campaigns from Supabase.');
     }
   }
 
@@ -94,7 +94,7 @@ export async function fetchCampaigns(): Promise<Campaign[]> {
 
 /**
  * Create a new campaign.
- * Persists in Supabase, falls back to localStorage on failure.
+ * Persists in Supabase when configured, using local storage only for tests/offline mode.
  */
 export async function createCampaign(
   brandId: string,
@@ -129,14 +129,14 @@ export async function createCampaign(
         .single();
 
       if (error) {
-        console.warn('Supabase insert campaign failed, saving to cache:', error.message);
+        throw new Error(`Unable to publish campaign to Supabase: ${error.message}`);
       } else if (data) {
         const saved = mapRowToCampaign(data);
         await syncToLocalStorage(saved);
         return saved;
       }
     } catch (e) {
-      console.warn('Failed to save campaign to Supabase:', e);
+      throw e instanceof Error ? e : new Error('Unable to publish campaign to Supabase.');
     }
   }
 
@@ -169,14 +169,14 @@ export async function updateCampaign(
         .single();
 
       if (error) {
-        console.warn('Supabase update campaign failed:', error.message);
+        throw new Error(`Unable to update campaign in Supabase: ${error.message}`);
       } else if (updatedRow) {
         const saved = mapRowToCampaign(updatedRow);
         await syncToLocalStorage(saved);
         return saved;
       }
     } catch (e) {
-      console.warn('Failed to update campaign in Supabase:', e);
+      throw e instanceof Error ? e : new Error('Unable to update campaign in Supabase.');
     }
   }
 
@@ -196,10 +196,10 @@ export async function deleteCampaign(campaignId: string): Promise<void> {
         .eq('id', campaignId);
 
       if (error) {
-        console.warn('Supabase delete campaign failed:', error.message);
+        throw new Error(`Unable to delete campaign from Supabase: ${error.message}`);
       }
     } catch (e) {
-      console.warn('Failed to delete campaign from Supabase:', e);
+      throw e instanceof Error ? e : new Error('Unable to delete campaign from Supabase.');
     }
   }
 

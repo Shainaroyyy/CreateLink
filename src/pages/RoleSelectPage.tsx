@@ -1,9 +1,19 @@
 import { useNavigate } from 'react-router-dom';
+import { useAuthStore } from '../stores/authStore';
 import CreatorSparkGrowthIcon from '../components/icons/CreatorSparkGrowthIcon';
 import BrandTrustedNetworkIcon from '../components/icons/BrandTrustedNetworkIcon';
 
 export default function RoleSelectPage() {
   const navigate = useNavigate();
+  const { logout } = useAuthStore();
+
+  const selectRole = async (role: 'creator' | 'brand') => {
+    sessionStorage.setItem('createlink-login-role', role);
+    // Clear both local and Supabase sessions before entering a role-specific login flow.
+    await logout();
+    navigate(`/login?role=${role}`);
+  };
+
   return (
     <div className="min-h-screen bg-[#F6F2E8] flex items-center justify-center p-6">
       <div className="w-full max-w-5xl">
@@ -43,8 +53,8 @@ export default function RoleSelectPage() {
           <article
             role="button"
             tabIndex={0}
-            onClick={() => navigate('/login?role=creator')}
-            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && navigate('/login?role=creator')}
+            onClick={() => { void selectRole('creator'); }}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && void selectRole('creator')}
             className="
   relative
   overflow-hidden
@@ -126,7 +136,7 @@ export default function RoleSelectPage() {
             <div className="mt-10 flex items-center justify-between">
               <div className="text-xs text-[#9E9A97]">Creator experience</div>
               <button
-                onClick={(e) => { e.stopPropagation(); navigate('/login?role=creator'); }}
+                onClick={(e) => { e.stopPropagation(); void selectRole('creator'); }}
                 className="ml-4 px-5 py-3 bg-[#1F1F1F] text-white rounded-xl font-bold shadow-sm hover:opacity-95 transition"
               >
                 Continue
@@ -137,8 +147,8 @@ export default function RoleSelectPage() {
           <article
             role="button"
             tabIndex={0}
-            onClick={() => navigate('/login?role=brand')}
-            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && navigate('/login?role=brand')}
+            onClick={() => { void selectRole('brand'); }}
+            onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && void selectRole('brand')}
             className="
   relative
   overflow-hidden
@@ -221,7 +231,7 @@ hover:shadow-[0_0_40px_rgba(168,103,138,0.25)]
             <div className="mt-10 flex items-center justify-between">
               <div className="text-xs text-[#9E9A97]">Brand experience</div>
               <button
-                onClick={(e) => { e.stopPropagation(); navigate('/login?role=brand'); }}
+                onClick={(e) => { e.stopPropagation(); void selectRole('brand'); }}
                 className="ml-4 px-5 py-3 bg-[#1F1F1F] text-white rounded-xl font-bold shadow-sm hover:opacity-95 transition"
               >
                 Continue
