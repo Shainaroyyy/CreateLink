@@ -4,6 +4,7 @@ import type { Creator, Campaign, Application } from '../types/index';
 import { Link } from 'react-router-dom';
 import { fetchCampaigns } from '../services/campaignsService';
 import { fetchApplications } from '../services/applicationService';
+import { CreatorReviewExpandedCard } from '../components/brand/CreatorReviewExpandedCard';
 
 
 // Simple utility components — keep design consistent with app
@@ -118,7 +119,7 @@ export default function BrandDashboardPage() {
   return (
     <div className="grid grid-cols-12 gap-6">
       {/* Left: Discover */}
-      <div className="col-span-12 lg:col-span-4">
+      <div className="col-span-12 lg:col-span-3">
         <div className="bg-white border border-[#E7E1D8] rounded-[20px] p-4">
           <h3 className="text-sm font-bold mb-3">Discover Creators</h3>
           <div className="mb-3">
@@ -159,66 +160,48 @@ export default function BrandDashboardPage() {
       </div>
 
       {/* Center: Review + Campaigns */}
-      <div className="col-span-12 lg:col-span-5">
-        <div className="
-  bg-gradient-to-br
-  from-white
-  to-[#FCF6FA]
-  border border-[#E7E1D8]
-  rounded-[24px]
-  p-6
-  min-h-[72vh]
-  shadow-sm
-">
-          <h3 className="text-sm font-bold mb-3">Creator Review</h3>
+      <div className="col-span-12 lg:col-span-6 flex flex-col gap-4">
+        <div className="w-full flex-1">
           {nextCandidate ? (
-            <div className="w-full max-w-md">
-              <div className="bg-white border border-[#E7E1D8] rounded-xl p-4 shadow-md">
-                <div className="flex items-center gap-3">
-                  <img src={nextCandidate.avatarUrl} alt={nextCandidate.displayName} className="w-16 h-16 rounded-full" />
-                  <div>
-                    <h4 className="text-lg font-bold">{nextCandidate.displayName}</h4>
-                    <div className="text-xs text-[#6E6A65]">{nextCandidate.bio}</div>
-                    <div className="mt-2 flex items-center gap-2 text-[11px] text-[#6E6A65]"><span>{nextCandidate.trustScore}</span><span>â€¢</span><span>{nextCandidate.insights.averageEngagementRate}% ER</span></div>
-                  </div>
-                </div>
-                <div className="mt-4">
-                  <div className="grid grid-cols-3 gap-2">
-                    <button onClick={() => handleSwipe('left')} className="px-3 py-2 bg-[#FFEBEB] rounded-lg">Reject</button>
-                    <button onClick={() => handleSwipe('down')} className="px-3 py-2 bg-[#FFF7EB] rounded-lg">Waitlist</button>
-                    <button onClick={() => handleSwipe('right')} className="px-3 py-2 bg-[#E8FFF6] rounded-lg">Approve</button>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <CreatorReviewExpandedCard
+              creator={nextCandidate}
+              currentIndex={queueIdx}
+              totalCount={filteredCreators.length}
+              onPrev={() => setQueueIdx(i => Math.max(i - 1, 0))}
+              onNext={() => setQueueIdx(i => Math.min(i + 1, filteredCreators.length - 1))}
+              onAction={handleSwipe}
+            />
           ) : (
-            <div className="text-sm text-[#9E9A97]">No more candidates</div>
-          )}
-
-          <div className="mt-4 w-full">
-            <h4 className="text-sm font-bold mb-2">Campaigns</h4>
-            <div className="space-y-2">
-              {campaigns.map(c => (
-                <div key={c.id} className="p-3 border border-[#F0EBE3] rounded-md flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-bold">{c.title}</div>
-                    <div className="text-xs text-[#6E6A65]">Status: {c.status}</div>
-                    {(() => {
-                      const campApps = applications.filter(a => a.campaignId === c.id);
-                      const total = campApps.length;
-                      const shortlisted = campApps.filter(a => a.status === 'shortlisted' || a.status === 'waitlisted').length;
-                      const accepted = campApps.filter(a => a.status === 'accepted' || a.status === 'approved').length;
-                      return (
-                        <div className="text-[10px] text-[#A8678A] font-extrabold mt-1">
-                          Applicants: {total} | Shortlisted: {shortlisted} | Accepted: {accepted}
-                        </div>
-                      );
-                    })()}
-                  </div>
-                  <Link to={`/brand/me/campaigns/${c.id}/review`} className="px-3 py-1 bg-[#F8EFF3] rounded-md text-xs font-bold">Review</Link>
-                </div>
-              ))}
+            <div className="bg-white border border-[#E7E1D8] rounded-[24px] shadow-sm p-6 flex flex-col items-center justify-center min-h-[400px]">
+              <h2 className="text-xl font-bold text-[#1F1F1F] mb-2">Creator Review</h2>
+              <div className="text-sm text-[#9E9A97]">No more candidates</div>
             </div>
+          )}
+        </div>
+
+        <div className="bg-white border border-[#E7E1D8] rounded-[24px] p-6 shadow-sm w-full">
+          <h4 className="text-sm font-bold mb-3">Campaigns</h4>
+          <div className="space-y-2">
+            {campaigns.map(c => (
+              <div key={c.id} className="p-3 border border-[#F0EBE3] rounded-md flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-bold">{c.title}</div>
+                  <div className="text-xs text-[#6E6A65]">Status: {c.status}</div>
+                  {(() => {
+                    const campApps = applications.filter(a => a.campaignId === c.id);
+                    const total = campApps.length;
+                    const shortlisted = campApps.filter(a => a.status === 'shortlisted' || a.status === 'waitlisted').length;
+                    const accepted = campApps.filter(a => a.status === 'accepted' || a.status === 'approved').length;
+                    return (
+                      <div className="text-[10px] text-[#A8678A] font-extrabold mt-1">
+                        Applicants: {total} | Shortlisted: {shortlisted} | Accepted: {accepted}
+                      </div>
+                    );
+                  })()}
+                </div>
+                <Link to={`/brand/me/campaigns/${c.id}/review`} className="px-3 py-1 bg-[#F8EFF3] rounded-md text-xs font-bold">Review</Link>
+              </div>
+            ))}
           </div>
         </div>
       </div>
